@@ -1,0 +1,16 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+
+MAX_SCRIPT_TEXT_LENGTH = 50000
+MAX_UPLOAD_FILE_SIZE_MB = 10
+CACHE_TTL_HOURS = 24
+RATE_LIMIT_MAX_REQUESTS = 10
+RATE_LIMIT_WINDOW_SECONDS = 60
+
+AGENT4_BASE_URL = os.getenv("AGENT4_BASE_URL", "http://localhost:8001")

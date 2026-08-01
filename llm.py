@@ -1,0 +1,52 @@
+import time
+import os
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+_client = genai.Client(api_key=GEMINI_API_KEY)
+
+
+def embed_text(text: str, max_retries: int = 3) -> list[float]:
+    if not text or not text.strip():
+        raise ValueError("Cannot embed empty text")
+
+    for attempt in range(max_retries):
+        try:
+            response = _client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=text,
+                config=types.EmbedContentConfig(output_dimensionality=768),
+            )
+            return response.embeddings[0].values
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def generate_text(system_prompt: str, user_prompt: str, max_retries: int = 3) -> str:
+    if not user_prompt or not user_prompt.strip():
+        raise ValueError("Cannot generate from empty prompt")
+    for attempt in range(max_retries):
+        try:
+            response = _client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.2,
+                ),
+            )
+            return response.text
+        except Exception as exc:
+            if "503" in str(exc) or "UNAVAILABLE" in str(exc):
+                if attempt == max_retries - 1:
+                    return "I'm having trouble generating a response right now. Please try again."
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
