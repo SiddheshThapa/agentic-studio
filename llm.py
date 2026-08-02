@@ -3,6 +3,7 @@ import os
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from config import CHAT_MODEL, EMBEDDING_MODEL
 
 load_dotenv()
 
@@ -17,7 +18,7 @@ def embed_text(text: str, max_retries: int = 3) -> list[float]:
     for attempt in range(max_retries):
         try:
             response = _client.models.embed_content(
-                model="gemini-embedding-001",
+                model=EMBEDDING_MODEL,
                 contents=text,
                 config=types.EmbedContentConfig(output_dimensionality=768),
             )
@@ -28,17 +29,24 @@ def embed_text(text: str, max_retries: int = 3) -> list[float]:
             time.sleep(2 ** attempt)
 
 
-def generate_text(system_prompt: str, user_prompt: str, max_retries: int = 3) -> str:
+def generate_text(
+    system_prompt: str,
+    user_prompt: str,
+    max_retries: int = 3,
+    temperature: float = 0.2,
+    response_json: bool = False,
+) -> str:
     if not user_prompt or not user_prompt.strip():
         raise ValueError("Cannot generate from empty prompt")
     for attempt in range(max_retries):
         try:
             response = _client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model=CHAT_MODEL,
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    temperature=0.2,
+                    temperature=temperature,
+                    response_mime_type="application/json" if response_json else None,
                 ),
             )
             return response.text

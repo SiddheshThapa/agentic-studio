@@ -5,6 +5,7 @@ from agents import (
     analyze_script,
     get_genre_release_listing,
     check_release_conflicts,
+    resolve_genre_from_listing,
 )
 from database import get_result
 
@@ -25,9 +26,11 @@ async def route_node(state: SupervisorState) -> SupervisorState:
     elif task == "release_listing":
         result = await get_genre_release_listing(state["script_text"].strip())
     elif task == "release_check":
-        genre, proposed_date, listing_result_id = state["script_text"].split("|", 2)
-        listing_text = get_result(int(listing_result_id.strip()))["result"]
-        result = check_release_conflicts(genre.strip(), proposed_date.strip(), listing_text)
+        proposed_date, listing_result_id = state["script_text"].split("|", 1)
+        listing_result_id = int(listing_result_id.strip())
+        listing_text = get_result(listing_result_id)["result"]
+        genre = resolve_genre_from_listing(listing_result_id)
+        result = check_release_conflicts(genre, proposed_date.strip(), listing_text)
     else:
         result = f"Unknown task: {task}"
 

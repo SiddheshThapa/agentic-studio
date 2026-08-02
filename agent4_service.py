@@ -13,10 +13,47 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from a2a.utils import new_agent_text_message
 
+from config import SUPPORTED_COUNTRIES
+
 NAGER_API_BASE = "https://date.nager.at/api/v3/publicholidays"
-COUNTRY_CODES = ["US", "MX", "GB", "JP", "DE"]
 CONFLICT_WINDOW_DAYS = 3
 AGENT4_PORT = int(os.getenv("AGENT4_PORT", "8001"))
+
+# Hardcoded, publicly known/announced dates. Verified against official
+# sources at the time this was written; needs periodic manual updates as
+# further years are announced.
+SUPER_BOWL_DATES = {
+    2026: "2026-02-08",  # Super Bowl LX, Levi's Stadium
+    2027: "2027-02-14",  # Super Bowl LXI, SoFi Stadium
+    2028: "2028-02-13",  # Super Bowl LXII, Mercedes-Benz Stadium
+}
+WORLD_CUP_FINAL_DATES = {
+    2026: "2026-07-19",  # MetLife Stadium
+    2030: "2030-07-21",  # Morocco/Portugal/Spain
+}
+OSCARS_DATES = {
+    2026: "2026-03-15",  # 98th Academy Awards
+    2027: "2027-03-14",  # 99th Academy Awards
+    2028: "2028-03-05",  # 100th Academy Awards
+}
+GOLDEN_GLOBES_DATES = {
+    2026: "2026-01-11",  # 83rd Golden Globes
+    2027: "2027-01-10",  # 84th Golden Globes
+}
+GRAMMYS_DATES = {
+    2026: "2026-02-01",  # 68th Grammy Awards
+    2027: "2027-02-07",  # 69th Grammy Awards
+}
+
+SPORTING_EVENTS = {
+    "Super Bowl": SUPER_BOWL_DATES,
+    "FIFA World Cup Final": WORLD_CUP_FINAL_DATES,
+}
+AWARDS_EVENTS = {
+    "Oscars": OSCARS_DATES,
+    "Golden Globes": GOLDEN_GLOBES_DATES,
+    "Grammy Awards": GRAMMYS_DATES,
+}
 
 
 def _fetch_holidays_for_year(year: int, country_code: str) -> list[dict] | None:
@@ -38,7 +75,7 @@ def check_country_holidays(date_str: str) -> dict:
         years_to_check.add(proposed_date.year + 1)
 
     report = {}
-    for country_code in COUNTRY_CODES:
+    for country_code in SUPPORTED_COUNTRIES:
         holidays = []
         primary_year_failed = False
 
@@ -87,10 +124,42 @@ def check_country_holidays(date_str: str) -> dict:
     return report
 
 
+def check_global_event_conflicts(
+    date_str: str, event_group: dict[str, dict[int, str]], window_days: int = CONFLICT_WINDOW_DAYS
+) -> list[dict]:
+    proposed_date = date.fromisoformat(date_str)
+
+    results = []
+    for event_name, dates_by_year in event_group.items():
+        candidates = [date.fromisoformat(d) for d in dates_by_year.values()]
+        if not candidates:
+            continue
+
+        nearest = min(candidates, key=lambda d: abs((d - proposed_date).days))
+        days_away = abs((nearest - proposed_date).days)
+
+        results.append({
+            "name": event_name,
+            "date": nearest.isoformat(),
+            "conflict": days_away <= window_days,
+            "days_away": days_away,
+        })
+
+    return results
+
+
+def check_all_conflicts(date_str: str) -> dict:
+    return {
+        "holidays": check_country_holidays(date_str),
+        "sporting_events": check_global_event_conflicts(date_str, SPORTING_EVENTS),
+        "awards_ceremonies": check_global_event_conflicts(date_str, AWARDS_EVENTS),
+    }
+
+
 class HolidayCheckExecutor(AgentExecutor):
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         date_str = context.get_user_input().strip()
-        report = check_country_holidays(date_str)
+        report = check_all_conflicts(date_str)
         await event_queue.enqueue_event(new_agent_text_message(json.dumps(report)))
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -98,11 +167,13 @@ class HolidayCheckExecutor(AgentExecutor):
 
 
 agent_card = AgentCard(
-    name="Agent 4 - Holiday Checker",
+    name="Agent 4 - Release Date Conflict Checker",
     description=(
         "Checks whether a proposed release date falls within "
         f"{CONFLICT_WINDOW_DAYS} days of a public holiday in "
-        f"{', '.join(COUNTRY_CODES)}."
+        f"{', '.join(SUPPORTED_COUNTRIES)}, a major sporting event (Super Bowl, "
+        "FIFA World Cup final), or a major awards ceremony (Oscars, Golden "
+        "Globes, Grammy Awards)."
     ),
     url=f"http://localhost:{AGENT4_PORT}/",
     version="1.0.0",
@@ -112,13 +183,15 @@ agent_card = AgentCard(
     skills=[
         AgentSkill(
             id="check-holiday-conflicts",
-            name="Check Holiday Conflicts",
+            name="Check Release Date Conflicts",
             description=(
-                "Given a date (YYYY-MM-DD), reports which of US, MX, GB, JP, "
-                "and DE have a public holiday within "
-                f"{CONFLICT_WINDOW_DAYS} days of it."
+                "Given a date (YYYY-MM-DD), reports holiday conflicts for "
+                f"{', '.join(SUPPORTED_COUNTRIES)}, plus conflicts with major "
+                "sporting events and major awards ceremonies, all within "
+                f"{CONFLICT_WINDOW_DAYS} days of the given date, in a single "
+                "combined report."
             ),
-            tags=["holidays", "scheduling"],
+            tags=["holidays", "sporting-events", "awards", "scheduling"],
             examples=["2026-12-24"],
         )
     ],

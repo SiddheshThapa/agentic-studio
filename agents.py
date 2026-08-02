@@ -5,6 +5,7 @@ from guardrails import check_retrieval_confidence
 from retrieval import hybrid_search
 from resilience import safe_generate
 from config import TMDB_API_KEY
+from database import get_result_with_script
 
 TMDB_DISCOVER_URL = "https://api.themoviedb.org/3/discover/movie"
 
@@ -114,6 +115,11 @@ async def get_genre_release_listing(genre: str) -> str:
         f"- {film['title']} ({film.get('release_date') or 'date unknown'})"
         for film in films
     )
+
+
+def resolve_genre_from_listing(listing_result_id: int) -> str:
+    listing = get_result_with_script(listing_result_id)
+    return listing["script_text"].strip()
 
 
 def check_release_conflicts(genre: str, proposed_date: str, listing_text: str) -> str:
