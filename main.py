@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000","https://agentic-studio-152wtv0n2-siddhesh6.vercel.app/"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
