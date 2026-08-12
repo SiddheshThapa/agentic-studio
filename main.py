@@ -38,6 +38,10 @@ app.add_middleware(
         "http://localhost:3000",
         "https://agentic-studio-eight.vercel.app",
     ],
+    # Vercel assigns every deployment (production or preview) its own unique
+    # domain in addition to the stable one above — this covers those so a new
+    # deployment doesn't require another CORS update.
+    allow_origin_regex=r"https://agentic-studio(-[a-zA-Z0-9]+)*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )
