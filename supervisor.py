@@ -5,9 +5,8 @@ from agents import (
     analyze_script,
     get_genre_release_listing,
     check_release_conflicts,
-    resolve_genre_from_listing,
 )
-from database import get_result
+from database import get_result_with_script
 
 
 class SupervisorState(TypedDict):
@@ -28,9 +27,20 @@ async def route_node(state: SupervisorState) -> SupervisorState:
     elif task == "release_check":
         proposed_date, listing_result_id = state["script_text"].split("|", 1)
         listing_result_id = int(listing_result_id.strip())
-        listing_text = get_result(listing_result_id)["result"]
-        genre = resolve_genre_from_listing(listing_result_id)
-        result = check_release_conflicts(genre, proposed_date.strip(), listing_text)
+
+        # One fetch, not two: the genre is this row's script_text and the film
+        # list is its result, so the old get_result + resolve_genre_from_listing
+        # pair was reading the same row twice.
+        listing = get_result_with_script(listing_result_id)
+        if listing is None:
+            result = (
+                f"No release listing found with ID {listing_result_id}. "
+                "Run Browse Upcoming Releases first, then use the ID it returns."
+            )
+        else:
+            result = check_release_conflicts(
+                listing["script_text"].strip(), proposed_date.strip(), listing["result"]
+            )
     else:
         result = f"Unknown task: {task}"
 

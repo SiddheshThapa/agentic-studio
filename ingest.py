@@ -1,5 +1,5 @@
 from llm import embed_text, generate_text
-from database import get_connection, insert_document
+from database import document_exists, insert_document
 
 
 
@@ -28,19 +28,6 @@ def chunk_text(text: str, words_per_chunk: int = 300, overlap: int = 50) -> list
             break
 
     return chunks
-
-
-def document_exists(collection: str, text: str) -> bool:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id FROM documents WHERE collection = %s AND text = %s LIMIT 1;",
-        (collection, text)
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row is not None
 
 
 def ingest_document(text: str, metadata: dict) -> list[int]:

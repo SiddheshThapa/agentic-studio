@@ -11,9 +11,9 @@ from a2a.types import MessageSendParams, SendMessageRequest
 from a2a.utils import get_message_text
 from config import MAX_UPLOAD_FILE_SIZE_MB, AGENT4_BASE_URL, CALENDAR_MODE, API_SECRET_KEY, SUPPORTED_COUNTRIES
 from database import (
-    init_tables, save_result, get_result, get_connection,
-    get_result_with_script, delete_documents_by_filename, cache_get, cache_set,
-    memory_add, memory_get, save_eval_record, get_eval_summary, generate_eval_chart
+    init_tables, get_result, connection, record_run,
+    get_result_with_script, delete_documents_by_filename, cache_get,
+    memory_get, save_eval_record, get_eval_summary, generate_eval_chart
 )
 from ingest import ingest_document
 from supervisor import run_supervisor
@@ -159,8 +159,8 @@ async def ingest_endpoint(file: UploadFile = File(...)):
 @app.get("/health")
 async def health_check():
     try:
-        conn = get_connection()
-        conn.close()
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1;")
         db_status = "ok"
     except Exception:
         db_status = "unreachable"
@@ -191,25 +191,29 @@ async def run_agent_endpoint(
     if not check_query_safety(script_text, min_length=min_length):
         raise HTTPException(status_code=400, detail="Script text is too short or invalid.")
 
-    memory_add(session_id, "user", f"[{task.value}] {script_text[:200]}")
-
     cache_key = f"{task.value}:{script_text}"
     cached = cache_get(cache_key)
+    user_turn = f"[{task.value}] {script_text[:200]}"
 
     if cached:
-        result_id = save_result(task.value, script_text, cached)
-        memory_add(session_id, "assistant", cached[:200])
+        # cache_question=None: this answer is already cached, don't rewrite it.
+        result_id = record_run(
+            task=task.value, script_text=script_text, result=cached,
+            session_id=session_id, user_turn=user_turn, assistant_turn=cached[:200],
+        )
         return {"result_id": result_id, "task": task.value, "result": cached, "from_cache": True}
 
     state = await run_supervisor(script_text, task.value)
-    cache_set(cache_key, state["result"])
-    result_id = save_result(task.value, script_text, state["result"])
-    memory_add(session_id, "assistant", state["result"][:200])
+    result_id = record_run(
+        task=task.value, script_text=script_text, result=state["result"],
+        session_id=session_id, user_turn=user_turn,
+        assistant_turn=state["result"][:200], cache_question=cache_key,
+    )
 
     eval_score = None
     if evaluate:
         faith_result = score_faithfulness(script_text, state["result"])
-        save_eval_record(task.value, faith_result.score, None)
+        save_eval_record(task.value, faith_result.score)
         eval_score = faith_result.model_dump()
 
     return {
