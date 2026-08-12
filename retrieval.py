@@ -1,10 +1,23 @@
 import json
 from llm import embed_text, generate_text
 from database import search_similar, bm25_search
+from resilience import logger
 import numpy as np
 
 
 def gemini_rerank(query: str, candidates: list[dict]) -> list[dict]:
+    """Score each candidate 0-10 for absolute relevance to the query.
+
+    On success every candidate carries a numeric `rerank_score`. If the reranker
+    is unavailable or returns something unusable, `rerank_score` is set to None
+    rather than being back-filled from `hybrid_score`.
+
+    That back-fill used to be a silent trap: `hybrid_score` is max-normalised to
+    0.0-1.0 and is a *ranking* value, not a confidence value, so it could never
+    clear the 5.0 confidence threshold in guardrails.py. Every reranker hiccup
+    therefore looked exactly like "your knowledge base has nothing relevant".
+    None makes the two cases distinguishable — see guardrails.retrieval_status.
+    """
     if not candidates:
         return candidates
 
@@ -18,17 +31,25 @@ Documents:
 {candidates_text}"""
 
     try:
-        response = generate_text("You are a relevance scoring system. Respond only with JSON.", prompt)
+        response = generate_text(
+            "You are a relevance scoring system. Respond only with JSON.",
+            prompt,
+            temperature=0.0,
+            response_json=True,
+        )
         scores = json.loads(response).get("scores", [])
         if len(scores) != len(candidates):
-            return candidates
+            raise ValueError(
+                f"reranker returned {len(scores)} scores for {len(candidates)} documents"
+            )
         for i, c in enumerate(candidates):
             c["rerank_score"] = float(scores[i])
         candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
         return candidates
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"Reranking unavailable, falling back to hybrid order: {exc}")
         for c in candidates:
-            c["rerank_score"] = c.get("hybrid_score", 0.0)
+            c["rerank_score"] = None
         return candidates
 
 
@@ -53,6 +74,9 @@ def hybrid_search(query: str, collection: str = None, top_k: int = 3, candidate_
             }
 
     candidate_list = list(candidates.values())
+    if not candidate_list:
+        return []
+
     dense_scores = np.array([c["dense_score"] for c in candidate_list])
     bm25_scores = np.array([c["bm25_score"] for c in candidate_list])
     dense_norm = dense_scores / (dense_scores.max() + 1e-9)
