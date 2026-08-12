@@ -18,6 +18,7 @@ from config import SUPPORTED_COUNTRIES
 NAGER_API_BASE = "https://date.nager.at/api/v3/publicholidays"
 CONFLICT_WINDOW_DAYS = 3
 AGENT4_PORT = int(os.getenv("AGENT4_PORT", "8001"))
+AGENT4_PUBLIC_URL = os.getenv("AGENT4_PUBLIC_URL", f"http://localhost:{AGENT4_PORT}/")
 
 # Hardcoded, publicly known/announced dates. Verified against official
 # sources at the time this was written; needs periodic manual updates as
@@ -175,7 +176,7 @@ agent_card = AgentCard(
         "FIFA World Cup final), or a major awards ceremony (Oscars, Golden "
         "Globes, Grammy Awards)."
     ),
-    url=f"http://localhost:{AGENT4_PORT}/",
+    url=AGENT4_PUBLIC_URL,
     version="1.0.0",
     default_input_modes=["text"],
     default_output_modes=["text"],
