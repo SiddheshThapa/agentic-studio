@@ -27,7 +27,8 @@ export default function RootLayout({
       lang="en"
       className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-slate-950 text-slate-100">{children}</body>
+      {/* suppressHydrationWarning: extensions (Grammarly et al) inject attributes onto <body> before hydration */}
+      <body suppressHydrationWarning className="min-h-full flex flex-col bg-slate-950 text-slate-100">{children}</body>
     </html>
   );
 }

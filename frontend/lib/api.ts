@@ -66,7 +66,6 @@ export interface HistoryTurn {
 
 export interface EvalSummary {
   average_faithfulness: number | null;
-  average_context_precision: number | null;
   count: number;
 }
 
