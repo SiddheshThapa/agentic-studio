@@ -64,7 +64,7 @@ COUNTRY_DISPLAY_NAMES = {
 async def _check_conflicts_via_a2a(date_str: str) -> dict:
     async with httpx.AsyncClient() as httpx_client:
         agent_card = await A2ACardResolver(httpx_client, AGENT4_BASE_URL).get_agent_card()
-        client = A2AClient(httpx_client, agent_card=agent_card)
+        client = A2AClient(httpx_client, agent_card=agent_card, url=AGENT4_BASE_URL)
 
         request = SendMessageRequest(
             id=str(uuid4()),
