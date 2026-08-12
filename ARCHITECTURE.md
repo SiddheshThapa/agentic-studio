@@ -23,8 +23,7 @@ Environment settings: GEMINI_API_KEY, DATABASE_URL, TMDB_API_KEY,
 CHAT_MODEL (default `"gemini-2.5-flash-lite"`) and EMBEDDING_MODEL
 (default `"gemini-embedding-001"`) — the Gemini model names llm.py calls,
 overridable without a code change if a newer/different model needs
-swapping in, MAX_SCRIPT_TEXT_LENGTH, MAX_UPLOAD_FILE_SIZE_MB,
-CACHE_TTL_HOURS, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
+swapping in, MAX_UPLOAD_FILE_SIZE_MB,
 AGENT4_BASE_URL, CALENDAR_MODE (`"mcp"` or `"service_account"`, default
 `"service_account"`), GOOGLE_SERVICE_ACCOUNT_JSON (path to a service
 account credentials file), API_SECRET_KEY (shared secret required on
@@ -42,7 +41,21 @@ AgentResponse (Pydantic model: result_id, task, result, from_cache, eval).
 EvalResult (Pydantic model: score, reasoning).
 
 ### database.py [synchronous, psycopg2]
-get_connection — retry-wrapped via resilience.py's with_retry decorator.
+get_pool / connection — all access goes through a lazily-built
+ThreadedConnectionPool (DB_POOL_MIN..DB_POOL_MAX, default 1-10). The pool
+is created on first use rather than at import, so an unreachable database
+fails individual endpoints instead of breaking the import. `connection()`
+is a context manager that always returns the connection to the pool and
+rolls back on error. There is no `get_connection()` — closing a pooled
+connection would destroy it. Opening a connection to the remote database
+costs ~2.4s, which is why connection-per-query was replaced.
+_fetch_one / _fetch_all / _execute / _execute_returning — the four
+helpers every query uses; they replaced the same eight lines of
+cursor/execute/fetch/commit/close repeated across fifteen functions.
+record_run — writes the results, memory (both turns), and cache rows for
+one agent run in a single statement via data-modifying CTEs: one round
+trip and one transaction, so an answer can no longer be cached while its
+results row failed to save. Pass cache_question=None on a cache hit.
 init_tables — creates all 5 tables (documents, cache, memory, results,
 eval_history) and enables Row Level Security on all 5.
 insert_document, search_similar, get_all_documents_for_bm25, bm25_search,
@@ -66,7 +79,7 @@ evaluator.py's eval functions.
 
 ### resilience.py
 with_retry — decorator for automatic retry with exponential backoff, used
-on database.py's get_connection.
+on database.py's pool construction.
 check_rate_limit — in-memory per-session request tracker, used on
 /run-agent only.
 logger — shared Python logging instance, used across main.py, including
@@ -101,8 +114,16 @@ second-person dialogue between characters (false positive) and miss
 abuse using words outside better-profanity's word list, e.g. mild
 insults like "useless" or "idiot" (false negative); see Known
 Limitations.
-check_retrieval_confidence — rejects retrieval results below a
-rerank_score threshold, preventing weak matches from being used.
+retrieval_status — classifies a retrieval result as one of four states:
+"empty" (nothing matched), "unscored" (documents found but the reranker
+could not score them, so relevance is unknown), "low_relevance" (scored,
+none cleared the threshold), or "confident". Callers branch on these so
+that a reranker outage no longer looks identical to an empty knowledge
+base. rerank_score is 0-10 and is None on reranker failure; hybrid_score
+is 0.0-1.0 and measures rank order, not relevance — they must never be
+compared against the same threshold.
+check_retrieval_confidence — legacy boolean wrapper, true only for
+"confident". Prefer retrieval_status.
 
 ### retrieval.py
 hybrid_search — the single retrieval path used by agents.py. Combines
@@ -110,13 +131,6 @@ database.py's search_similar (dense/vector) and bm25_search (keyword),
 normalizes both score types to 0-1, fuses with a 0.6 dense / 0.4 BM25
 weighting, then reranks the shortlist via gemini_rerank (one batched
 Gemini call scoring all candidates at once).
-
-### web_fetch.py [async]
-fetch_page_text — async httpx GET plus BeautifulSoup cleaning of a
-webpage's text content. Direct HTTP implementation (not the MCP
-protocol). Not currently called anywhere in the codebase — Agent 3's
-release-listing step fetches structured data directly from the TMDb API
-(see agents.py) instead of scraping a webpage.
 
 ### calendar_mcp.py [async, real MCP protocol]
 create_calendar_event_via_mcp — connects to the @cocal/google-calendar-mcp
@@ -198,8 +212,10 @@ store the rest.
 ### agents.py [mixed sync/async]
 check_compliance(script_text) [sync] — uses safe_generate to flag risky
 content, retrieval.hybrid_search against the "guidelines" collection,
-check_retrieval_confidence to gate on weak matches, then generates the
-final compliance report citing the matched guideline text.
+then branches on guardrails.retrieval_status: "empty" tells the user to
+upload guidelines, "low_relevance" recommends manual review, "unscored"
+produces the report with an explicit caveat that ranking was unavailable,
+and "confident" produces it normally.
 analyze_script(script_text) [sync] — generates a direct structural
 analysis (logline, pacing/clarity scores with reasoning), searches the
 "past_films" collection via hybrid_search, then produces a final
@@ -218,11 +234,19 @@ previously stored release_listing result via database.py's
 get_result_with_script and returns its stored script_text (the genre
 that was originally submitted for that listing), so a genre never needs
 to be supplied a second time by the caller.
+parse_listing(listing_text) [sync] — turns a stored listing back into
+(title, date) pairs, returning undated titles separately so they are
+surfaced rather than silently dropped.
+find_competing_releases(proposed_date, listing_text, window_days=14)
+[sync] — the films within the window, each with a signed day offset
+(negative = opens before the proposed date), sorted by release date.
 check_release_conflicts(genre, proposed_date, listing_text) [sync] — no
-I/O of its own; takes a genre, a proposed date, and a previously fetched
-listing_text (the output of get_genre_release_listing, retrieved via
-database.py's get_result), and asks the LLM to identify any competing
-releases within 2 weeks of the proposed date.
+I/O and no LLM call; formats the output of find_competing_releases into
+the stored report. This was a Gemini call that read the listing as prose;
+because the listing is generated data with known dates in it, the
+comparison is now arithmetic — about 0.025 ms instead of seconds, free,
+deterministic, and unable to invent a film that was never in the list.
+Covered by test_release_conflicts.py.
 
 ### supervisor.py [async throughout]
 SupervisorState — TypedDict with script_text, task, result.
@@ -231,10 +255,12 @@ route_node [async] — single routing function, branches on task:
 "analyze" calls analyze_script directly (no await, sync function),
 "release_listing" awaits get_genre_release_listing (async, no LLM call),
 "release_check" splits script_text on "|" into proposed_date and a
-listing result_id only, loads the listing text via database.py's
-get_result, resolves genre from the referenced listing result via
-agents.py's resolve_genre_from_listing, then calls
-check_release_conflicts directly (no await, sync function).
+listing result_id, loads that listing row **once** via database.py's
+get_result_with_script — the genre is its script_text and the film list
+is its result, so the earlier get_result + resolve_genre_from_listing
+pair was reading the same row twice — then calls check_release_conflicts
+directly (no await, sync function). A missing listing id returns an
+explanatory message instead of raising TypeError.
 build_supervisor — builds a single-node graph: route → END.
 run_supervisor [async] — invokes the graph via graph.ainvoke(...).
 
@@ -257,12 +283,13 @@ is wrapped in one try/except: any failure (LLM error, rate limit, or
 unparseable response) returns EvalResult(score=None, reasoning="Could
 not parse evaluation response.") instead of raising — so an eval failure
 never crashes /run-agent's main response.
-score_context_precision(query, retrieved_chunks) → dict — same pattern
-(temperature=0.0, JSON response mode, fully wrapped try/except) asking
-the LLM to judge whether retrieved chunks were relevant to the query.
-Defined but not currently called from any endpoint; wiring it in
-requires agents.py to also return the chunks it retrieved, which it does
-not currently do.
+
+### test_release_conflicts.py [synchronous, no test framework]
+15 assert-based checks covering agents.py's listing parser, the
+competition window (inclusive at 14 days), signed day offsets, titles
+containing parentheses, and all four guardrails.retrieval_status states.
+Runs as `python test_release_conflicts.py`; also collectable by pytest
+unchanged if pytest is ever added. These are the only tests in the repo.
 
 ### main.py [FastAPI, async endpoints]
 CORS middleware — allow_origins restricted to `http://localhost:3000`
@@ -414,25 +441,44 @@ network failures and non-OK responses into a thrown `ApiError` carrying
 the HTTP status and a message extracted from the response body's
 `detail`/`error` field.
 
-frontend/app/page.tsx — the entire UI: a tab bar (Agents, Documents,
-History & Results, Insights) plus a health-check pill in the header that
-polls GET /health every 30s.
-- AgentsPanel — task picker (compliance / analyze / release_listing /
-  release_check) with the matching input for each task, runs
-  POST /run-agent, and for release_check results, offers both the
-  one-click path (Confirm Proposed Date → /confirm-date, or an override
-  date → /override-date) and the review path (Check Holiday & Event
-  Conflicts → /check-conflicts, shows ConflictFindings and an editable
-  per-country date list seeded from recommended_dates, then Confirm &
-  Create Calendar Events → /finalize-calendar with only the
-  user-edited entries sent as overrides).
+frontend/app/page.tsx — the app shell only: header, health-check pill
+polling GET /health every 30s, an offline banner giving the commands to
+start the backend, and tab switching. Each tab lives in its own file
+under frontend/components/, with shared presentational pieces in
+components/ui.tsx and every sentence of user-facing explanation in
+lib/content.ts (which mirrors backend constants — GENRES must match
+agents.py's GENRE_IDS, MIN_SCRIPT_CHARS must match main.py's min_length).
+- GuidePanel — "Start here": what the tool does, the suggested order of
+  the other tabs, and a glossary (chunk, collection, session ID,
+  faithfulness, result ID).
+- AgentsPanel — the three script-facing tasks (compliance / analyze /
+  release_listing). Each states what it does, what input it needs, what
+  it returns, and its typical wait. Genre is a dropdown of the 19 TMDb
+  genres the backend accepts; script input shows a live character count
+  against the backend's minimum.
+- ReleasePlanner — the four-step release-date flow: genre →
+  POST /run-agent (release_listing), proposed date → POST /run-agent
+  (release_check), POST /check-conflicts, then an editable per-country
+  date list → POST /finalize-calendar with only user-edited entries as
+  overrides. The `"<date>|<listing_result_id>"` string is assembled
+  internally; the user never sees or copies a result ID. /confirm-date
+  and /override-date are no longer called by the UI — /finalize-calendar
+  covers both.
 - DocumentsPanel — PDF upload (POST /ingest) and delete-by-filename
-  (DELETE /document).
+  (DELETE /document), with previously uploaded filenames remembered in
+  localStorage via useSyncExternalStore and offered as clickable chips,
+  plus a confirmation step before deletion.
 - HistoryPanel — loads a session's stored turns (GET /history/{id}) and
   looks up/downloads a stored result by ID (GET /result/{id},
   GET /result/{id}/download).
 - InsightsPanel — GET /eval/summary and GET /eval/chart (rendered as a
-  base64 PNG `<img>`), with a manual refresh button.
+  base64 PNG `<img>`), with a manual refresh button and a plain-language
+  reading of what the average score means.
+
+Lint note: the React 19 config enforces react-hooks/set-state-in-effect,
+so a bare setState() in an effect body fails the build. Fetch inside an
+inline async IIFE with a `cancelled` guard, or use useSyncExternalStore
+for external stores.
 
 Environment: frontend/.env.local sets NEXT_PUBLIC_API_URL (the FastAPI
 base URL, e.g. `http://localhost:8000`) and NEXT_PUBLIC_API_KEY (must
@@ -494,16 +540,25 @@ main.py receives a request
 
 ## Known limitations
 1. Database access is synchronous (psycopg2) inside async FastAPI
-   endpoints, which serializes database calls under concurrent load.
-   Scaling this would require migrating database.py to asyncpg.
-2. score_context_precision is implemented but not wired into any
-   endpoint; doing so requires agents.py to also return retrieved chunks
-   alongside its text answer.
-3. MAX_SCRIPT_TEXT_LENGTH is defined in config.py but not currently
-   enforced against incoming script_text.
+   endpoints, which blocks the event loop during queries and serializes
+   them under concurrent load. Connection pooling removed the ~2.4s
+   handshake per query, but each round trip to the remote database still
+   costs roughly a second; /run-agent is down to 3 of them. Going
+   further means moving the database closer to the API or migrating to
+   an async driver.
+2. bm25_search pulls every documents row and rebuilds the whole BM25
+   index on every query. Fine at a few hundred chunks, unusable at tens
+   of thousands.
+3. ingest.py classifies each chunk separately, so one document can
+   scatter across collections, and it costs one LLM call per chunk.
+   Classification should be one decision per document. Chunks also store
+   no page numbers, so citations cannot point at a location.
 4. Agent 3's release-listing step reads TMDb's first results page only
    (no pagination beyond ~20 films) and does not include per-film studio
    data, since that requires a separate TMDb movie-details call per film.
+   It also sorts by TMDb popularity, which is a weak proxy for
+   competitive threat — it mixes indie, streaming and foreign titles
+   with wide theatrical releases.
 5. The API key check protects the 7 mutating/costly endpoints
    (/run-agent, /confirm-date, /override-date, /check-conflicts,
    /finalize-calendar, /ingest, DELETE /document) only. Read-only
