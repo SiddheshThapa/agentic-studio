@@ -1,6 +1,0 @@
-{
-    "python.defaultInterpreterPath": "d:\\agentic-studio\\backend\\venv\\Scripts\\python.exe",
-    "python.analysis.extraPaths": [
-        "d:\\agentic-studio\\backend"
-    ]
-}
