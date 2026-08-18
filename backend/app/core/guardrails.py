@@ -32,11 +32,11 @@ def check_content_toxicity(text: str) -> bool:
     return False
 
 
-def check_query_safety(text: str, min_length: int = 10) -> bool:
+def check_query_safety(text: str, min_length: int = 10, check_toxicity: bool = True) -> bool:
     if not text or len(text.strip()) < min_length:
         return False
 
-    if check_content_toxicity(text):
+    if check_toxicity and check_content_toxicity(text):
         return False
 
     lowered = " ".join(text.lower().split())

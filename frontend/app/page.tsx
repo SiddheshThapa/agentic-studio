@@ -39,6 +39,7 @@ const TASKS: { value: TaskType; label: string; hint: string }[] = [
   { value: "analyze", label: "Script Analysis", hint: "Structural analysis + comparables" },
   { value: "release_listing", label: "Browse Releases", hint: "Upcoming titles by genre" },
   { value: "release_check", label: "Check Release Date", hint: "Conflict-check a proposed date" },
+  { value: "greenlight", label: "Greenlight Committee", hint: "Full Multi-Agent Boardroom Debate" },
 ];
 
 function errorMessage(err: unknown): string {
@@ -242,6 +243,147 @@ function ConflictFindings({ report }: { report: ConflictReport }) {
   );
 }
 
+function GreenlightCommitteeResult({ resultString }: { resultString: string }) {
+  let data;
+  try {
+    data = JSON.parse(resultString);
+  } catch {
+    return <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{resultString}</p>;
+  }
+
+  const { digest, pitch, review, verdict, trace } = data;
+  
+  if (!digest || !pitch || !review || !verdict) {
+    return <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{resultString}</p>;
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* 1. Data Processing Trace */}
+      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
+        <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Data Processing Trace</h3>
+        <div className="space-y-2 text-sm text-slate-400">
+          {(trace || []).map((t: string, i: number) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-950 text-emerald-400">✓</span>
+              {t}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 2. Script Digest */}
+      <div className="rounded-lg border border-slate-700 bg-slate-900/80 p-5 shadow-lg shadow-black/20">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Script Dossier</h3>
+          <Badge tone="slate">{digest.genre}</Badge>
+        </div>
+        <p className="mb-4 text-sm text-slate-300"><span className="font-medium text-slate-500">Tone:</span> {digest.tone}</p>
+        <div className="space-y-3">
+          <div>
+            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Marketable Hooks</span>
+            <ul className="mt-1 list-inside list-disc text-sm text-slate-300">
+              {digest.marketable_hooks.map((h: string, i: number) => <li key={i}>{h}</li>)}
+            </ul>
+          </div>
+          {digest.rating_relevant_content?.length > 0 && (
+            <div>
+              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Rating Content</span>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {digest.rating_relevant_content.map((c: string, i: number) => (
+                  <span key={i} className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-400">{c}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 3. Producer Pitch */}
+      <div className="animate-fade-in-up rounded-lg border border-blue-800/50 bg-blue-950/20 p-5 shadow-[0_0_15px_rgba(37,99,235,0.1)]">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white shadow-lg shadow-blue-600/30 font-bold">P</div>
+          <h3 className="text-sm font-semibold text-blue-100">Producer Pitch</h3>
+        </div>
+        
+        <div className="space-y-4 text-sm">
+          <div>
+            <h4 className="text-xs font-medium uppercase tracking-wide text-blue-400/70">Concept & Strengths</h4>
+            <div className="mt-1 font-semibold text-blue-50">{pitch.pitch_fields.title_concept}</div>
+            <ul className="mt-1 list-inside list-disc text-slate-300">
+              {pitch.pitch_fields.strengths?.map((s: string, i: number) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <h4 className="text-xs font-medium uppercase tracking-wide text-blue-400/70">Target Demo</h4>
+              <p className="mt-1 text-slate-300">{pitch.pitch_fields.target_demographic}</p>
+            </div>
+            <div>
+              <h4 className="text-xs font-medium uppercase tracking-wide text-blue-400/70">Budget Tier</h4>
+              <p className="mt-1 text-slate-300">{pitch.pitch_fields.budget_tier}</p>
+            </div>
+          </div>
+          
+          <div className="rounded border border-blue-900/50 bg-blue-950/40 p-3">
+            <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-blue-400/70">Strategy & Mitigation</h4>
+            <p className="text-slate-300">{pitch.strategy}</p>
+            {pitch.pitch_fields.mitigation_plan && (
+              <p className="mt-2 text-slate-300">{pitch.pitch_fields.mitigation_plan}</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 4. Executive Review */}
+      <div className="animate-fade-in-up rounded-lg border border-violet-800/50 bg-violet-950/20 p-5 shadow-[0_0_15px_rgba(139,92,246,0.1)]" style={{ animationDelay: '200ms' }}>
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-violet-600 text-white shadow-lg shadow-violet-600/30 font-bold">E</div>
+            <h3 className="text-sm font-semibold text-violet-100">Executive Memo</h3>
+          </div>
+          <Badge tone={review.is_approved ? "emerald" : "amber"}>
+            {review.is_approved ? "Greenlit for Dev" : "Revisions Requested"}
+          </Badge>
+        </div>
+        
+        <div className="space-y-4 text-sm">
+          <p className="leading-relaxed text-slate-300">{review.message}</p>
+          
+          {review.concern_list?.length > 0 && (
+            <div className="rounded border border-amber-900/50 bg-amber-950/20 p-3">
+              <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-amber-500/70">Key Concerns & Conditions</h4>
+              <ul className="list-inside list-disc space-y-1 text-amber-200/90">
+                {review.concern_list.map((c: string, i: number) => <li key={i}>{c}</li>)}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 5. Studio Stamp Verdict */}
+      <div className="animate-fade-in-up pt-4" style={{ animationDelay: '400ms' }}>
+        <div className={`flex flex-col items-center justify-center rounded-xl border-2 p-6 text-center ${
+          verdict.status === 'GREEN' ? 'border-emerald-600 bg-emerald-950/30 shadow-[0_0_30px_rgba(5,150,105,0.2)]' :
+          verdict.status === 'YELLOW' ? 'border-amber-500 bg-amber-950/30 shadow-[0_0_30px_rgba(245,158,11,0.2)]' :
+          'border-red-600 bg-red-950/30 shadow-[0_0_30px_rgba(220,38,38,0.2)]'
+        }`}>
+          <div className={`mb-2 text-3xl font-black tracking-widest uppercase ${
+            verdict.status === 'GREEN' ? 'text-emerald-500' :
+            verdict.status === 'YELLOW' ? 'text-amber-500' :
+            'text-red-500'
+          }`}>
+            {verdict.status}
+          </div>
+          <p className="text-sm font-medium text-slate-300">{verdict.message}</p>
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Agents
 // ---------------------------------------------------------------------------
@@ -394,7 +536,7 @@ function AgentsPanel() {
           ))}
         </div>
 
-        {(task === "compliance" || task === "analyze") && (
+        {(task === "compliance" || task === "analyze" || task === "greenlight") && (
           <textarea
             value={scriptText}
             onChange={(e) => setScriptText(e.target.value)}
@@ -490,7 +632,11 @@ function AgentsPanel() {
               </div>
             </div>
 
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{result.result}</p>
+            {result.task === "greenlight" ? (
+              <GreenlightCommitteeResult resultString={result.result} />
+            ) : (
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{result.result}</p>
+            )}
 
             {result.eval?.reasoning && (
               <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-500">

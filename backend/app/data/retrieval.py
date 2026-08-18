@@ -1,6 +1,6 @@
 import json
-from llm import embed_text, generate_text
-from database import search_similar, bm25_search
+from app.core.llm import embed_text, generate_text
+from app.data.database import search_similar, bm25_search
 import numpy as np
 
 
@@ -53,6 +53,9 @@ def hybrid_search(query: str, collection: str = None, top_k: int = 3, candidate_
             }
 
     candidate_list = list(candidates.values())
+    if not candidate_list:
+        return []
+
     dense_scores = np.array([c["dense_score"] for c in candidate_list])
     bm25_scores = np.array([c["bm25_score"] for c in candidate_list])
     dense_norm = dense_scores / (dense_scores.max() + 1e-9)

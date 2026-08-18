@@ -1,6 +1,9 @@
 import json
 import os
+import sys
 from datetime import date, datetime
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 import uvicorn
@@ -13,7 +16,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from a2a.utils import new_agent_text_message
 
-from config import SUPPORTED_COUNTRIES
+from app.core.config import SUPPORTED_COUNTRIES
 
 NAGER_API_BASE = "https://date.nager.at/api/v3/publicholidays"
 CONFLICT_WINDOW_DAYS = 3

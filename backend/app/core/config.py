@@ -6,7 +6,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.5-flash-lite")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 
 MAX_SCRIPT_TEXT_LENGTH = 50000

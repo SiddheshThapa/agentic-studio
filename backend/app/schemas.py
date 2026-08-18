@@ -9,6 +9,7 @@ class TaskType(str, Enum):
     analyze = "analyze"
     release_listing = "release_listing"
     release_check = "release_check"
+    greenlight = "greenlight"
 
 
 

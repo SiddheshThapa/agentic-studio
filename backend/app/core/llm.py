@@ -3,7 +3,7 @@ import os
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from config import CHAT_MODEL, EMBEDDING_MODEL
+from app.core.config import CHAT_MODEL, EMBEDDING_MODEL
 
 load_dotenv()
 
