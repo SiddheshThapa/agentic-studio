@@ -1,0 +1,9 @@
+venv/
+.env
+gcp-credentials.json
+service-account-credentials.json
+__pycache__/
+*.pyc
+.claude/
+openspec/
+.idea/

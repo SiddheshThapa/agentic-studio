@@ -283,7 +283,7 @@ function GreenlightCommitteeResult({ resultString }: { resultString: string }) {
           <div>
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Marketable Hooks</span>
             <ul className="mt-1 list-inside list-disc text-sm text-slate-300">
-              {digest.marketable_hooks.map((h: string, i: number) => <li key={i}>{h}</li>)}
+              {(digest.marketable_hooks ?? []).map((h: string, i: number) => <li key={i}>{h}</li>)}
             </ul>
           </div>
           {digest.rating_relevant_content?.length > 0 && (

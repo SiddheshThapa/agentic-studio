@@ -5,6 +5,7 @@ from app.core.guardrails import check_retrieval_confidence
 from app.data.retrieval import hybrid_search
 from app.core.resilience import safe_generate
 from app.core.config import TMDB_API_KEY, AGENT4_BASE_URL
+from app.ai.evaluator import _parse_json_response
 import json
 from uuid import uuid4
 from a2a.client import A2ACardResolver, A2AClient, create_text_message_object
@@ -165,7 +166,7 @@ def check_compliance_structured(script_text: str) -> dict:
     
     result = generate_text("You are a compliance checker. Output strict JSON with lists 'hard_violations' and 'soft_violations'.", prompt, response_json=True)
     try:
-        return json.loads(result)
+        return _parse_json_response(result)
     except Exception:
         return {"hard_violations": [], "soft_violations": [], "message": "Failed to parse compliance"}
 
@@ -174,9 +175,16 @@ def generate_script_digest(script_text: str) -> dict:
     prompt = f"Condense the following script into a digest containing 'genre', 'tone', 'rating_relevant_content' (list), and 'marketable_hooks' (list). Script: {script_text}"
     result = generate_text("You are a script summarizer. Output strict JSON with 'genre', 'tone', 'rating_relevant_content', and 'marketable_hooks'.", prompt, response_json=True)
     try:
-        return json.loads(result)
+        return _parse_json_response(result)
     except Exception:
-        return {"error": "Failed to parse digest", "raw": result}
+        return {
+            "error": "Failed to parse digest",
+            "raw": result,
+            "genre": "unknown",
+            "tone": "unknown",
+            "rating_relevant_content": [],
+            "marketable_hooks": [],
+        }
 
 
 def producer_agent(script_digest: dict, executive_rejections: list[str] = None) -> dict:
@@ -188,7 +196,7 @@ def producer_agent(script_digest: dict, executive_rejections: list[str] = None) 
     
     result = generate_text("You are a passionate film producer. Output strict JSON.", prompt, response_json=True)
     try:
-        return json.loads(result)
+        return _parse_json_response(result)
     except Exception:
         return {"pitch_fields": {}, "strategy": "Error generating pitch"}
 
@@ -199,6 +207,6 @@ def executive_agent(script_digest: dict, producer_pitch: dict, compliance_data: 
     
     result = generate_text("You are a pragmatic studio executive. Output strict JSON.", prompt, response_json=True)
     try:
-        return json.loads(result)
+        return _parse_json_response(result)
     except Exception:
         return {"concern_list": ["Error generating review"], "is_approved": False, "message": "Parse error"}
