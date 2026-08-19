@@ -13,7 +13,11 @@ from config import MAX_UPLOAD_FILE_SIZE_MB, AGENT4_BASE_URL, CALENDAR_MODE, API_
 from database import (
     init_tables, get_result, connection, record_run,
     get_result_with_script, delete_documents_by_filename, cache_get,
-    memory_get, save_eval_record, get_eval_summary, generate_eval_chart
+    memory_get, save_eval_record, get_eval_summary, generate_eval_chart,
+    ADMIN_LIST_DEFAULT_LIMIT, ADMIN_LIST_MAX_LIMIT, AdminTableError,
+    admin_columns, admin_delete_row, admin_get_row, admin_insert_row,
+    admin_list_rows, admin_structural_warnings, admin_table_summary,
+    admin_update_row,
 )
 from ingest import ingest_document
 from supervisor import run_supervisor
@@ -359,3 +363,104 @@ async def download_result_endpoint(result_id: int):
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=result_{result_id}.pdf"}
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin table browser
+#
+# Generic list/read/create/update/delete over the five tables. The SQL lives in
+# database.py with every other query; these are thin wrappers that translate
+# AdminTableError into HTTP status codes.
+#
+# The whole prefix requires an API key, including the read routes. The app's
+# other open reads return one known row (/result/{id}) or one named session
+# (/history/{id}); GET /admin/tables/memory returns every session anyone has
+# ever run, which is a different exposure and gets the same gate as the writes.
+# ---------------------------------------------------------------------------
+
+
+def _admin_or_400(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except AdminTableError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+
+@app.get("/admin/tables", dependencies=[Depends(require_api_key)])
+async def admin_tables_endpoint():
+    return {
+        "tables": admin_table_summary(),
+        "pagination": {"default_limit": ADMIN_LIST_DEFAULT_LIMIT, "max_limit": ADMIN_LIST_MAX_LIMIT},
+        "structural_fields": (
+            "Columns marked structural are read for meaning elsewhere in the app, not just "
+            "stored. Editing one is allowed and not blocked here; each carries the note "
+            "explaining what depends on it."
+        ),
+    }
+
+
+@app.get("/admin/tables/{table}", dependencies=[Depends(require_api_key)])
+async def admin_list_endpoint(
+    table: str,
+    limit: int = ADMIN_LIST_DEFAULT_LIMIT,
+    offset: int = 0,
+    q: str | None = None,
+):
+    return _admin_or_400(admin_list_rows, table, limit=limit, offset=offset, query=q)
+
+
+@app.get("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key)])
+async def admin_get_row_endpoint(table: str, row_id: str):
+    row = _admin_or_400(admin_get_row, table, row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No row {row_id} in '{table}'.")
+
+    return {
+        "table": table,
+        "row_id": row_id,
+        "columns": _admin_or_400(admin_columns, table),
+        "row": row,
+    }
+
+
+@app.post("/admin/tables/{table}", dependencies=[Depends(require_api_key)])
+async def admin_create_row_endpoint(table: str, values: dict = Body(...)):
+    warnings = _admin_or_400(admin_structural_warnings, table, list(values))
+    try:
+        created = _admin_or_400(admin_insert_row, table, values)
+    except HTTPException:
+        raise
+    except Exception as err:
+        # NOT NULL, type and constraint violations arrive here. The database is
+        # the authority on what a valid row is; this just reports its refusal.
+        logger.warning(f"admin insert into {table} rejected: {err}")
+        raise HTTPException(status_code=400, detail=f"The database rejected this row: {err}")
+
+    return {"table": table, **created, "structural_warnings": warnings}
+
+
+@app.patch("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key)])
+async def admin_update_row_endpoint(table: str, row_id: str, values: dict = Body(...)):
+    warnings = _admin_or_400(admin_structural_warnings, table, list(values))
+    try:
+        updated = _admin_or_400(admin_update_row, table, row_id, values)
+    except HTTPException:
+        raise
+    except Exception as err:
+        logger.warning(f"admin update of {table}/{row_id} rejected: {err}")
+        raise HTTPException(status_code=400, detail=f"The database rejected this change: {err}")
+
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"No row {row_id} in '{table}'.")
+
+    return {"table": table, "row_id": row_id, **updated, "structural_warnings": warnings}
+
+
+@app.delete("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key)])
+async def admin_delete_row_endpoint(table: str, row_id: str):
+    deleted = _admin_or_400(admin_delete_row, table, row_id)
+    if deleted["deleted_rows"] == 0:
+        raise HTTPException(status_code=404, detail=f"No row {row_id} in '{table}'.")
+
+    logger.info(f"admin deleted {deleted['deleted_rows']} row(s) from {table} via id={row_id}")
+    return {"table": table, "row_id": row_id, **deleted}

@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import threading
 from contextlib import contextmanager
 import psycopg2
@@ -372,6 +373,371 @@ def get_eval_summary() -> dict:
         "count": len(rows),
         "average_faithfulness": round(sum(faith_scores) / len(faith_scores), 2) if faith_scores else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Admin table browser
+#
+# Generic list/read/create/update/delete over the five tables, for an admin UI
+# that does not know the schema in advance. Everything here goes through the
+# same pool helpers as the rest of this file — there is no second connection
+# path, and no cursor is opened outside connection().
+#
+# Two rules make the generic SQL safe:
+#   1. Table names come from ADMIN_TABLES below, never from the request.
+#   2. Column names are checked against information_schema for that table, and
+#      both must satisfy _SAFE_IDENTIFIER, before they are interpolated.
+# Values are always bound parameters. Nothing user-supplied is ever formatted
+# into a statement.
+# ---------------------------------------------------------------------------
+
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+ADMIN_LIST_DEFAULT_LIMIT = 50
+ADMIN_LIST_MAX_LIMIT = 200
+
+# `structural` marks columns that other code reads for meaning rather than as
+# plain data. Editing one is allowed — the note is what the API surfaces so a
+# client can warn before it happens.
+ADMIN_TABLES: dict[str, dict] = {
+    "documents": {
+        "pk": "id",
+        "pk_type": "int",
+        "order_by": "id DESC",
+        # Grouped by filename: one uploaded PDF becomes many chunk rows, so a
+        # delete has to take the whole group (see admin_delete_row).
+        "delete_via": "filename",
+        "omit": frozenset({"embedding"}),
+        "structural": {
+            "embedding": (
+                "vector(768) written by ingest.py from the chunk text. Dense search "
+                "matches on this; a value that no longer corresponds to the text makes "
+                "the chunk unfindable. Omitted from row payloads because of its size."
+            ),
+            "metadata": (
+                "metadata->>'filename' groups every chunk of one uploaded PDF. "
+                "DELETE /document and this table's delete both key off it, so clearing "
+                "it leaves chunks that can only be removed by id."
+            ),
+        },
+        "note": "One row per chunk, not per document. Prefer POST /ingest over creating rows here — it chunks, classifies and embeds; a row created here has no embedding and will never be returned by dense search.",
+    },
+    "cache": {
+        "pk": "question",
+        "pk_type": "text",
+        "order_by": "created_at DESC, question DESC",
+        "structural": {
+            "question": (
+                "A sha256 digest of '<task>:<script_text>', not readable question text "
+                "(database.py::_cache_key). Editing it orphans the row — no lookup will "
+                "ever match it again."
+            ),
+            "created_at": (
+                "The 24-hour TTL is computed from this at read time "
+                "(cache_get: created_at > NOW() - INTERVAL). There is no expiry column, "
+                "so moving this forward revives an expired answer."
+            ),
+        },
+        "note": "Answers keyed by a hash of their input. Deleting a row only forces the next identical run to call the model again.",
+    },
+    "memory": {
+        "pk": "id",
+        "pk_type": "int",
+        "order_by": "created_at DESC, id DESC",
+        "structural": {
+            "created_at": (
+                "memory_get orders by created_at DESC, id DESC. Both turns of one run are "
+                "written by a single statement and share a transaction timestamp, so "
+                "created_at alone cannot separate them."
+            ),
+            "id": (
+                "The tiebreaker for the ordering above. Rewriting ids can sort an "
+                "assistant reply before the question it answers."
+            ),
+        },
+        "note": "Conversation turns, two per agent run. Listed newest-first, which is the same ordering memory_get depends on.",
+    },
+    "results": {
+        "pk": "id",
+        "pk_type": "int",
+        "order_by": "id DESC",
+        "structural": {
+            "script_text": (
+                "For release_check rows this is not script text but '<date>|<listing_result_id>'. "
+                "/check-conflicts, /confirm-date, /override-date and /finalize-calendar all "
+                "re-split it on '|'. Changing the format breaks all four."
+            ),
+        },
+        "note": "One row per agent run. Its id is the result_id the UI shows and /result/{id} reads.",
+    },
+    "eval_history": {
+        "pk": "id",
+        "pk_type": "int",
+        "order_by": "id DESC",
+        "structural": {},
+        "note": "Faithfulness scores. /eval/summary averages faithfulness_score; /eval/chart plots it ordered by created_at.",
+    },
+}
+
+
+class AdminTableError(ValueError):
+    """Bad table, column, or row id. main.py turns this into a 400/404."""
+
+
+def admin_table_names() -> list[str]:
+    return sorted(ADMIN_TABLES)
+
+
+def _admin_table(table: str) -> dict:
+    spec = ADMIN_TABLES.get(table)
+    if spec is None:
+        raise AdminTableError(
+            f"Unknown table '{table}'. Known tables: {', '.join(admin_table_names())}."
+        )
+    return spec
+
+
+def _safe(identifier: str) -> str:
+    """Quote an identifier that has already been validated against the schema."""
+    if not _SAFE_IDENTIFIER.match(identifier):
+        raise AdminTableError(f"Unusable column name '{identifier}'.")
+    return f'"{identifier}"'
+
+
+def _clamp_limit(limit: int) -> int:
+    return max(1, min(int(limit), ADMIN_LIST_MAX_LIMIT))
+
+
+def _coerce_pk(spec: dict, row_id):
+    """Path parameters arrive as strings; the int-keyed tables need real ints."""
+    if spec["pk_type"] != "int":
+        return str(row_id)
+    try:
+        return int(row_id)
+    except (TypeError, ValueError):
+        raise AdminTableError(f"Row id must be a whole number, got '{row_id}'.")
+
+
+def admin_columns(table: str) -> list[dict]:
+    """Live column metadata, so a client can render the table without the schema.
+
+    Read from information_schema rather than hardcoded, because the schema is
+    created with CREATE TABLE IF NOT EXISTS and has been hand-altered before —
+    a hardcoded list would drift silently.
+    """
+    spec = _admin_table(table)
+    rows = _fetch_all(
+        """
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        ORDER BY ordinal_position;
+        """,
+        (table,),
+    )
+    structural = spec["structural"]
+    omitted = spec.get("omit", frozenset())
+
+    return [
+        {
+            "name": name,
+            "type": data_type,
+            "nullable": is_nullable == "YES",
+            "default": default,
+            "primary_key": name == spec["pk"],
+            "structural": name in structural,
+            "structural_note": structural.get(name),
+            "omitted": name in omitted,
+        }
+        for name, data_type, is_nullable, default in rows
+    ]
+
+
+def _readable_columns(table: str) -> list[str]:
+    spec = _admin_table(table)
+    omitted = spec.get("omit", frozenset())
+    return [c["name"] for c in admin_columns(table) if c["name"] not in omitted]
+
+
+def _row_to_dict(columns: list[str], row: tuple) -> dict:
+    return dict(zip(columns, row))
+
+
+def admin_table_summary() -> list[dict]:
+    """Every table with its row count, for the browser's index."""
+    summary = []
+    for name in admin_table_names():
+        spec = ADMIN_TABLES[name]
+        # Safe: `name` is a literal key of ADMIN_TABLES, never request input.
+        total = _fetch_one(f"SELECT COUNT(*) FROM {_safe(name)};")[0]
+        summary.append(
+            {
+                "name": name,
+                "primary_key": spec["pk"],
+                "rows": total,
+                "structural_columns": sorted(spec["structural"]),
+                "note": spec["note"],
+            }
+        )
+    return summary
+
+
+def _search_clause(columns: list[str], query: str | None) -> tuple[str, list]:
+    """Case-insensitive substring match across every readable column.
+
+    Each column is cast to text so one clause covers ids, timestamps and JSONB
+    alike — searching "2026-11" finds a created_at, "thriller" finds a task.
+
+    ponytail: this is a sequential scan with an ILIKE per column, which is fine
+    for a table you can browse by hand and wrong for one you cannot. If it ever
+    matters, add a pg_trgm index per searched column, or a tsvector column
+    maintained by a trigger, and match against that instead.
+    """
+    if not query or not query.strip():
+        return "", []
+    clauses = " OR ".join(f"({_safe(c)})::text ILIKE %s" for c in columns)
+    return f" WHERE ({clauses})", [f"%{query.strip()}%"] * len(columns)
+
+
+def admin_list_rows(
+    table: str,
+    limit: int = ADMIN_LIST_DEFAULT_LIMIT,
+    offset: int = 0,
+    query: str | None = None,
+) -> dict:
+    spec = _admin_table(table)
+    limit = _clamp_limit(limit)
+    offset = max(0, int(offset))
+
+    columns = _readable_columns(table)
+    selected = ", ".join(_safe(c) for c in columns)
+    where, where_params = _search_clause(columns, query)
+
+    # The count uses the same filter, or pagination would page through a total
+    # that does not match the rows being shown.
+    total = _fetch_one(f"SELECT COUNT(*) FROM {_safe(table)}{where};", tuple(where_params))[0]
+    rows = _fetch_all(
+        f"SELECT {selected} FROM {_safe(table)}{where} ORDER BY {spec['order_by']} LIMIT %s OFFSET %s;",
+        tuple(where_params) + (limit, offset),
+    )
+
+    return {
+        "table": table,
+        "primary_key": spec["pk"],
+        "ordered_by": spec["order_by"],
+        "note": spec["note"],
+        "search": query.strip() if query and query.strip() else None,
+        "columns": admin_columns(table),
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+            "returned": len(rows),
+            "has_more": offset + len(rows) < total,
+        },
+        "rows": [_row_to_dict(columns, r) for r in rows],
+    }
+
+
+def admin_get_row(table: str, row_id) -> dict | None:
+    spec = _admin_table(table)
+    columns = _readable_columns(table)
+    selected = ", ".join(_safe(c) for c in columns)
+
+    row = _fetch_one(
+        f"SELECT {selected} FROM {_safe(table)} WHERE {_safe(spec['pk'])} = %s;",
+        (_coerce_pk(spec, row_id),),
+    )
+    return _row_to_dict(columns, row) if row else None
+
+
+def _validate_writable(table: str, values: dict) -> list[str]:
+    """Reject unknown columns before building a statement. Returns the column order."""
+    if not isinstance(values, dict) or not values:
+        raise AdminTableError("Provide at least one column to write, as a JSON object.")
+
+    known = {c["name"] for c in admin_columns(table)}
+    unknown = [c for c in values if c not in known]
+    if unknown:
+        raise AdminTableError(
+            f"Unknown column(s) for '{table}': {', '.join(sorted(unknown))}. "
+            f"Known columns: {', '.join(sorted(known))}."
+        )
+    return list(values)
+
+
+def admin_structural_warnings(table: str, columns: list[str]) -> list[dict]:
+    """The visible-risk part of the contract: name every structural column touched."""
+    structural = _admin_table(table)["structural"]
+    return [
+        {"column": c, "note": structural[c]} for c in columns if c in structural
+    ]
+
+
+def admin_insert_row(table: str, values: dict) -> dict:
+    spec = _admin_table(table)
+    columns = _validate_writable(table, values)
+
+    placeholders = ", ".join(["%s"] * len(columns))
+    names = ", ".join(_safe(c) for c in columns)
+    new_id = _execute_returning(
+        f"INSERT INTO {_safe(table)} ({names}) VALUES ({placeholders}) RETURNING {_safe(spec['pk'])};",
+        tuple(values[c] for c in columns),
+    )
+    return {"row_id": new_id, "row": admin_get_row(table, new_id)}
+
+
+def admin_update_row(table: str, row_id, values: dict) -> dict | None:
+    spec = _admin_table(table)
+    columns = _validate_writable(table, values)
+
+    assignments = ", ".join(f"{_safe(c)} = %s" for c in columns)
+    params = tuple(values[c] for c in columns) + (_coerce_pk(spec, row_id),)
+
+    affected = _execute(
+        f"UPDATE {_safe(table)} SET {assignments} WHERE {_safe(spec['pk'])} = %s;",
+        params,
+    )
+    if affected == 0:
+        return None
+
+    # The primary key may itself have been rewritten, so read back by the new value.
+    lookup = values.get(spec["pk"], row_id)
+    return {"updated": columns, "row": admin_get_row(table, lookup)}
+
+
+def admin_delete_row(table: str, row_id) -> dict:
+    """Delete one row — except in documents, where chunks are deleted as a group.
+
+    A documents row is one chunk of an uploaded PDF. Removing a single chunk
+    leaves a half-searchable document, so this routes to the same
+    delete_documents_by_filename path DELETE /document uses.
+    """
+    spec = _admin_table(table)
+    pk_value = _coerce_pk(spec, row_id)
+
+    if spec.get("delete_via") == "filename":
+        row = _fetch_one(
+            "SELECT metadata->>'filename' FROM documents WHERE id = %s;", (pk_value,)
+        )
+        if row is None:
+            return {"deleted_rows": 0, "grouped_by": None, "filename": None}
+        filename = row[0]
+        if not filename:
+            raise AdminTableError(
+                f"documents row {pk_value} has no metadata.filename, so its chunk group "
+                "cannot be identified. Chunks are deleted by filename, never individually."
+            )
+        return {
+            "deleted_rows": delete_documents_by_filename(filename),
+            "grouped_by": "filename",
+            "filename": filename,
+        }
+
+    affected = _execute(
+        f"DELETE FROM {_safe(table)} WHERE {_safe(spec['pk'])} = %s;", (pk_value,)
+    )
+    return {"deleted_rows": affected, "grouped_by": None}
 
 
 def generate_eval_chart() -> str:

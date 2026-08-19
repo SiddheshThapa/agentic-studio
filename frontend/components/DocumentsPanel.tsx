@@ -3,18 +3,23 @@
 
 import { useState, useSyncExternalStore } from "react";
 import { deleteDocument, ingestDocument } from "@/lib/api";
+import { DEMO_DOCUMENTS, isDemo } from "@/lib/demo";
 import {
   Card,
+  ConfirmPanel,
   ErrorAlert,
   Explain,
   Field,
   InfoNote,
+  PanelIntro,
   PrimaryButton,
+  Skeleton,
+  Spinner,
   SuccessNote,
   errorMessage,
   inputClass,
 } from "@/components/ui";
-import { GLOSSARY, MAX_UPLOAD_MB } from "@/lib/content";
+import { DEMO_COPY, GLOSSARY, MAX_UPLOAD_MB, PANEL_COPY } from "@/lib/content";
 
 // The backend has no "list documents" endpoint, so removal used to mean typing an
 // exact filename from memory. Remembering what this browser uploaded is enough to
@@ -39,7 +44,12 @@ function subscribe(fn: () => void) {
 }
 
 /** Must return a referentially stable value when nothing changed, or React loops. */
-function getSnapshot(): string[] {
+function getSnapshot(): readonly string[] {
+  // Demo Mode shows a fixed list and never reads or writes this browser's storage,
+  // so the two modes cannot see each other's filenames. app/page.tsx remounts the
+  // panel when the mode changes, so this is read fresh on every switch.
+  if (isDemo()) return DEMO_DOCUMENTS;
+
   let raw: string | null = null;
   try {
     raw = window.localStorage.getItem(STORAGE_KEY);
@@ -57,11 +67,12 @@ function getSnapshot(): string[] {
   return cachedList;
 }
 
-function getServerSnapshot(): string[] {
+function getServerSnapshot(): readonly string[] {
   return EMPTY;
 }
 
 function writeRemembered(names: string[]) {
+  if (isDemo()) return; // demo mode persists nothing
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(names));
   listeners.forEach((fn) => fn());
 }
@@ -132,31 +143,37 @@ export default function DocumentsPanel() {
   }
 
   return (
-    <div className="space-y-6">
-      <Card className="space-y-2">
-        <h2 className="font-semibold">Why upload anything?</h2>
-        <p className="text-sm leading-relaxed text-slate-400">
-          The agents answer from your documents, not from general knowledge. Upload your compliance
-          guidelines so Compliance Check has rules to cite, and past-film write-ups so Script Analysis
-          has comparisons to draw on. Without uploads the agents still run, but their answers are
-          generic.
-        </p>
-      </Card>
+    <div className="space-y-8">
+      <PanelIntro eyebrow={PANEL_COPY.documents.eyebrow} title={PANEL_COPY.documents.title}>
+        {PANEL_COPY.documents.intro}
+      </PanelIntro>
+
+      <InfoNote>
+        Upload your compliance guidelines so Compliance Check has rules to cite, and past-film
+        write-ups so Script Analysis has comparisons to draw on. Without uploads the agents still run,
+        but their answers are generic.
+      </InfoNote>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card className="space-y-5">
           <div>
-            <h2 className="font-semibold">Upload a document</h2>
-            <p className="mt-1 text-sm text-slate-500">
+            <h3 className="text-title font-semibold text-ink-50">{PANEL_COPY.sectionUpload}</h3>
+            <p className="mt-1.5 text-label leading-relaxed text-ink-400">
               PDF only, up to {MAX_UPLOAD_MB}MB. Text is extracted, split into chunks
               <Explain term="chunks">{GLOSSARY.chunks}</Explain> and sorted automatically
               <Explain term="collections">{GLOSSARY.collections}</Explain>
             </p>
           </div>
 
+          {/* The dropzone is the one place a dashed border earns its keep: it is
+              literally an empty slot waiting for a file. */}
           <label
-            className={`flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed py-10 transition-colors ${
-              tooBig ? "border-red-800 bg-red-950/20" : "border-slate-800 hover:border-slate-700"
+            className={`group flex cursor-pointer flex-col items-center justify-center gap-2 rounded-[var(--radius-surface)] border border-dashed py-12 transition-all duration-[var(--duration-base)] ease-[var(--ease-out-quint)] ${
+              tooBig
+                ? "border-red-500/40 bg-red-500/[0.06]"
+                : file
+                ? "border-iris-400/40 bg-iris-400/[0.06]"
+                : "border-white/12 bg-white/[0.02] hover:border-iris-400/40 hover:bg-iris-400/[0.04]"
             }`}
           >
             <input
@@ -169,8 +186,18 @@ export default function DocumentsPanel() {
               }}
               className="hidden"
             />
-            <span className="text-sm text-slate-300">{file ? file.name : "Click to choose a PDF"}</span>
-            <span className="text-xs text-slate-600">
+            <span
+              className={`flex h-10 w-10 items-center justify-center rounded-full border text-lg transition-colors ${
+                file ? "border-iris-400/40 text-iris-300" : "border-white/12 text-ink-500"
+              }`}
+              aria-hidden
+            >
+              ↑
+            </span>
+            <span className="text-label font-medium text-ink-100">
+              {file ? file.name : "Click to choose a PDF"}
+            </span>
+            <span className="text-xs text-ink-500">
               {file
                 ? `${(file.size / 1024 / 1024).toFixed(1)}MB${tooBig ? " — too large" : ""}`
                 : "or drag one onto this box"}
@@ -193,10 +220,20 @@ export default function DocumentsPanel() {
             {uploading ? "Reading and indexing…" : "Upload and index"}
           </PrimaryButton>
 
+          {/* Indexing is slow and gives no progress, so the wait gets its own
+              treatment rather than only a spinner inside the button. */}
           {uploading && (
-            <p className="text-center text-xs text-slate-600">
-              Long PDFs take a while — every chunk is sent for classification and indexing.
-            </p>
+            <div className="space-y-2 rounded-[var(--radius-control)] border border-iris-400/20 bg-iris-400/[0.05] p-3">
+              <div className="flex items-center gap-2 text-xs text-iris-200">
+                <Spinner className="h-3.5 w-3.5" />
+                Reading, splitting and classifying
+              </div>
+              <Skeleton className="h-2 w-full" />
+              <Skeleton className="h-2 w-4/5" />
+              <p className="text-[11px] text-ink-400">
+                Long PDFs take a while — every chunk is sent for classification and indexing.
+              </p>
+            </div>
           )}
           {uploadStatus && <SuccessNote>{uploadStatus}</SuccessNote>}
           {uploadError && <ErrorAlert message={uploadError} />}
@@ -204,24 +241,28 @@ export default function DocumentsPanel() {
 
         <Card className="space-y-5">
           <div>
-            <h2 className="font-semibold">Remove a document</h2>
-            <p className="mt-1 text-sm text-slate-500">
+            <h3 className="text-title font-semibold text-ink-50">{PANEL_COPY.sectionRemove}</h3>
+            <p className="mt-1.5 text-label leading-relaxed text-ink-400">
               Deletes every chunk that came from one file. The agents stop seeing it immediately.
             </p>
           </div>
 
+          {isDemo() && <InfoNote tone="amber">{DEMO_COPY.documentsNote}</InfoNote>}
+
           {remembered.length > 0 && (
             <div className="space-y-1.5">
-              <p className="text-xs text-slate-500">Uploaded from this browser — click to fill in:</p>
+              <p className="text-micro font-medium uppercase text-ink-500">
+                {isDemo() ? "Example documents" : "Uploaded from this browser"}
+              </p>
               <div className="flex flex-wrap gap-1.5">
                 {remembered.map((name) => (
                   <button
                     key={name}
                     onClick={() => setFilename(name)}
-                    className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                    className={`press rounded-full border px-2.5 py-1 text-xs ${
                       filename === name
-                        ? "border-blue-600 bg-blue-950/40 text-blue-300"
-                        : "border-slate-800 text-slate-400 hover:border-slate-700"
+                        ? "border-iris-400/50 bg-iris-400/10 text-iris-200"
+                        : "border-white/8 bg-white/[0.02] text-ink-400 hover:border-white/15 hover:text-ink-100"
                     }`}
                   >
                     {name}
@@ -259,29 +300,16 @@ export default function DocumentsPanel() {
               Remove from knowledge base
             </PrimaryButton>
           ) : (
-            <div className="animate-fade-in-up space-y-2 rounded-lg border border-red-900 bg-red-950/20 p-3">
-              <p className="text-sm text-red-200">
-                Remove every chunk from &quot;{filename}&quot;? You would need to re-upload the file to
-                undo this.
-              </p>
-              <div className="flex gap-2">
-                <PrimaryButton
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  loading={deleting}
-                  tone="red"
-                  className="flex-1"
-                >
-                  Yes, remove it
-                </PrimaryButton>
-                <button
-                  onClick={() => setConfirming(false)}
-                  className="rounded-lg border border-slate-700 px-4 text-sm text-slate-400 transition-colors hover:text-slate-200"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
+            // Same ConfirmPanel every destructive action in the app now uses.
+            <ConfirmPanel
+              title="Remove this document?"
+              what={`Every chunk from "${filename}" is deleted and the agents stop seeing it immediately.`}
+              risk="You would need to re-upload the file to undo this."
+              confirmLabel="Yes, remove it"
+              busy={deleting}
+              onConfirm={handleDelete}
+              onCancel={() => setConfirming(false)}
+            />
           )}
 
           {deleteStatus && <InfoNote>{deleteStatus}</InfoNote>}

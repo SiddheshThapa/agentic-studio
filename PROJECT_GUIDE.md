@@ -31,6 +31,19 @@ None of that came from changing the AI. The logic was already 0.025 ms; the time
 - Frontend rewritten for first-time users: a "Start here" tab, a guided four-step Release Planner replacing the hidden result-ID handoff, and per-task explanations of what each agent needs and returns. Split from one 980-line `page.tsx` into `components/` plus `lib/content.ts`.
 - First tests in the repo: `test_release_conflicts.py`, 15 checks, no framework needed.
 
+**Frontend features added on top of `lib/api.ts`**
+
+Every backend call already went through one `request<T>` helper, so all four of these hook into that single seam and **no tab component was modified** for any of them. Each has its own module-level store, none persists anything, and all are off by default. Detail: [Client-side features](#client-side-features).
+
+| Feature | Files | What it is for |
+|---|---|---|
+| **Demo Mode** | `lib/demo.ts` | Run the entire app against local fixtures — no backend, no Gemini quota, no calendar writes. Header toggle. |
+| **Guided walkthroughs** | `lib/content.ts::WALKTHROUGHS`, `components/Walkthrough.tsx` | Four narrated tours, one per pipeline, launched from the Start here tab. Each step names the control to click and carries a visual aid. Forces Demo Mode on. |
+| **Activity feed** | `lib/activity.ts`, `components/ActivityFeed.tsx` | Transient plain-language narration — "Searching the guidelines you uploaded…" → "Compliance report ready." Outcome lines are computed from the real response. |
+| **API log** | `lib/apilog.ts`, `components/ApiLogPanel.tsx` | Technical drawer: method, endpoint, payload, status, response, per call. Demo calls included and flagged `simulated`. The API key is masked everywhere it could print. |
+
+- Second test file, first on the frontend: `frontend/lib/demo.test.ts`, run with bare `node`.
+
 **Known-unfixed** issues are listed in `ARCHITECTURE.md` under Known limitations — most importantly `bm25_search` rebuilding its index from every row on every query, and `ingest.py` classifying per chunk rather than per document.
 
 ---
@@ -91,6 +104,8 @@ From `frontend/package.json`:
 - `react` / `react-dom` `19.2.4`
 - `tailwindcss` `^4` via `@tailwindcss/postcss`
 - `typescript` `^5`, `eslint` `^9` + `eslint-config-next`
+
+No test runner and no charting, diagramming, tour or toast library. `frontend/lib/demo.test.ts` runs under bare `node` (≥ 22.6, which strips TypeScript types natively); the walkthrough visuals and the activity feed are plain JSX and Tailwind; the API log's collapsible rows are native `<details>`.
 
 ### External services
 
@@ -195,6 +210,7 @@ Every credential and external account required, with the file that reads it:
 | Google OAuth desktop credentials | file `gcp-credentials.json` at project root (path built in `calendar_mcp.py:10`) | `calendar_mcp.py` | `CALENDAR_MODE=mcp` only |
 | Node.js / `npx` | — | `calendar_mcp.py:15` spawns `npx -y @cocal/google-calendar-mcp` | `CALENDAR_MODE=mcp` only |
 | Node.js ≥ whatever Next 16 requires | `frontend/package.json` | — | Frontend. Exact minimum: **Unknown / not found in codebase** |
+| Node.js ≥ 22.6 | — | — | `frontend/lib/demo.test.ts` only — it is TypeScript run directly, which needs native type stripping. The app itself does not require this |
 
 Notes grounded in code:
 
@@ -266,7 +282,9 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_API_KEY=<same value as API_SECRET_KEY>
 ```
 
-Both are read in `frontend/lib/api.ts:3-4` and default to `""` if absent — which silently points every request at the frontend's own origin.
+Both are read in `frontend/lib/api.ts` and default to `""` if absent — which silently points every request at the frontend's own origin.
+
+**Neither is needed to see the app running.** `npm install && npm run dev`, then switch **Demo Mode** on in the header: every tab answers from local fixtures, with no `.env.local`, no database, no API keys and no Python process. That is also the only safe way to demo the Release Planner, whose last step writes real Google Calendar events.
 
 ---
 
@@ -357,6 +375,14 @@ cd frontend && npm run build && npm start
 | `POST` | `/override-date/{result_id}` | 🔒 | Form: `new_date` (`YYYY-MM-DD`) |
 | `POST` | `/check-conflicts/{result_id}` | 🔒 | Query: `session_id` (str, default `"default"`) |
 | `POST` | `/finalize-calendar/{result_id}` | 🔒 | Query: `session_id`; JSON body: `{"US": "2026-05-01", …}` — keys must be in `SUPPORTED_COUNTRIES` or `400` |
+| `GET` | `/admin/tables` | 🔒 | none |
+| `GET` | `/admin/tables/{table}` | 🔒 | Query: `limit` (default 50, clamped to 1–200), `offset`, `q` (case-insensitive substring across every readable column) |
+| `GET` | `/admin/tables/{table}/{row_id}` | 🔒 | Path: `table` ∈ the 5 tables, `row_id` (int, or the sha256 key for `cache`) |
+| `POST` | `/admin/tables/{table}` | 🔒 | JSON body: `{column: value, …}` — unknown columns rejected |
+| `PATCH` | `/admin/tables/{table}/{row_id}` | 🔒 | JSON body: `{column: value, …}` |
+| `DELETE` | `/admin/tables/{table}/{row_id}` | 🔒 | Path only. For `documents` this deletes the whole filename group |
+
+The `/admin/tables` prefix requires a key on **reads as well as writes**, unlike the app's other read endpoints. `/result/{id}` returns one known row; `GET /admin/tables/memory` returns every session anyone has run. See [Admin table browser](#admin-table-browser).
 
 **Critical input format:** for `task=release_check`, `script_text` must be the pipe-joined string `"<YYYY-MM-DD>|<listing_result_id>"` — split in `supervisor.py:29` and again in every date endpoint in `main.py`. The `listing_result_id` must be the `result_id` of a prior `release_listing` run, because `resolve_genre_from_listing` reads that row's `script_text` back as the genre.
 
@@ -418,13 +444,144 @@ All five tables have `ROW LEVEL SECURITY` enabled by `init_tables()`, with no po
 - **Logs** — `resilience.py:5` configures stdout logging as `%(asctime)s [%(levelname)s] %(message)s` under logger name `agentic_studio`. No log file is written; `*.log` in `.gitignore` is unused by the code.
 - **Downloaded PDFs** — the browser saves `result_{id}.pdf` via `frontend/lib/api.ts::downloadResult`.
 
+With **Demo Mode** on, none of the above happens: no calendar event, no database row, no file, and no network request of any kind. PDF download is refused with an explanation rather than faked, since the file is rendered server-side.
+
+---
+
+## Admin table browser
+
+Generic list / read / create / update / delete over all five tables, for an admin UI that does not know the schema in advance. The SQL lives in `database.py` alongside every other query and uses the same `connection()` / `_fetch_*` / `_execute*` helpers — there is no second connection strategy.
+
+### How the generic SQL stays safe
+
+Only two things are ever interpolated into a statement, and neither comes from the request:
+
+1. **Table names** come from `database.py::ADMIN_TABLES`, a hardcoded registry of the five tables. An unregistered name is a `400`, not a query.
+2. **Column names** are checked against `information_schema.columns` for that table — the live schema, not a hardcoded list, because the schema is created with `CREATE TABLE IF NOT EXISTS` and has been hand-altered before.
+
+Both must then satisfy `^[A-Za-z_][A-Za-z0-9_]*$` (`_safe`) before being quoted. Every value is a bound parameter. `ORDER BY` clauses are literals in the registry.
+
+### Structural fields
+
+Some columns are read for their *meaning* elsewhere in the app rather than stored as plain data. The API marks them but does not block editing them — the point is that a client can warn:
+
+| Table.column | What depends on it |
+|---|---|
+| `results.script_text` | For `release_check` rows this is `"<date>\|<listing_result_id>"`, re-split by `/check-conflicts`, `/confirm-date`, `/override-date` and `/finalize-calendar` |
+| `memory.created_at` + `memory.id` | `memory_get` orders by `created_at DESC, id DESC`; both turns of a run share a transaction timestamp, so the `id` tiebreaker is what keeps a reply after its question |
+| `cache.created_at` | The 24-hour TTL is computed from this in SQL at read time. There is no expiry column, so moving it forward revives an expired answer |
+| `cache.question` | A sha256 digest of `"<task>:<script_text>"`, not question text. Editing it orphans the row |
+| `documents.embedding` | `vector(768)` written by `ingest.py`; dense search matches on it |
+| `documents.metadata` | `metadata->>'filename'` is what groups the chunks of one PDF |
+
+Each appears in the `columns[]` metadata as `"structural": true` with a `structural_note`, and any write that touches one comes back with a `structural_warnings` array naming it.
+
+### Search
+
+`?q=` matches a case-insensitive substring against every readable column, each cast to text, so one term covers ids, timestamps, task names and JSONB alike — `q=2026-11` finds a `created_at`, `q=thriller` finds a task. The count query carries the same filter, or pagination would page through a total that does not match the rows on screen.
+
+`ponytail:` it is a sequential scan with an ILIKE per column — fine for a table you can browse by hand, wrong for one you cannot. A `pg_trgm` index per searched column, or a maintained `tsvector`, is the upgrade.
+
+### Two behaviours worth knowing
+
+- **`documents.embedding` is omitted from row payloads** — 768 floats per chunk would make a 50-row page unusable. It still appears in `columns[]` with `"omitted": true`.
+- **Deleting a `documents` row deletes its whole filename group**, routed through the same `delete_documents_by_filename` path as `DELETE /document`, because one uploaded PDF is many chunk rows and removing one leaves a half-searchable document. The response carries `"grouped_by": "filename"` and the count. A chunk with no `metadata.filename` is refused with a `400` rather than deleted individually.
+
+### Response shape
+
+`GET /admin/tables/results?limit=2`:
+
+```json
+{
+  "table": "results",
+  "primary_key": "id",
+  "ordered_by": "id DESC",
+  "note": "One row per agent run…",
+  "columns": [
+    {"name": "id", "type": "integer", "nullable": false, "primary_key": true,
+     "structural": false, "structural_note": null, "omitted": false},
+    {"name": "script_text", "type": "text", "nullable": false, "primary_key": false,
+     "structural": true, "structural_note": "For release_check rows this is…", "omitted": false}
+  ],
+  "pagination": {"limit": 2, "offset": 0, "total": 812, "returned": 2, "has_more": true},
+  "rows": [{"id": 812, "task": "compliance", "script_text": "INT. WAREHOUSE…", "…": "…"}]
+}
+```
+
+`PATCH` and `POST` return the row as it now stands plus `structural_warnings`; `DELETE` returns `deleted_rows` and `grouped_by`.
+
+Creating rows is supported but rarely the right tool: every row in these tables is normally produced by a pipeline that maintains invariants a raw `INSERT` skips (`ingest_document` embeds and classifies, `record_run` writes results + memory + cache in one transaction). `documents` carries a note saying so; a row created there has no embedding and will never be returned by dense search.
+
+---
+
+## Client-side features
+
+Four features live entirely in the browser. They exist because `frontend/lib/api.ts` routes every backend call through one `request<T>` helper, which makes it the only place that has to know about any of them — **no tab component was changed to add any of these.** Each keeps its state in a module-level store read through `useSyncExternalStore`, so none of them needs an effect (the React 19 lint config rejects `setState` in an effect body). Nothing is written to `localStorage`: every toggle is off again on reload.
+
+### Demo Mode — `lib/demo.ts`
+
+A boolean plus a fixture table. When on, `request<T>` resolves against `demoRequest()` and no socket is opened.
+
+| | |
+|---|---|
+| Toggle | Header pill, off by default |
+| Covers | `/health`, `/run-agent` (all four tasks), `/check-conflicts`, `/finalize-calendar`, `/confirm-date`, `/override-date`, `/ingest`, `/document`, `/result/{id}`, `/history/{id}`, `/eval/summary`, `/eval/chart` |
+| Not covered | `GET /result/{id}/download` — the PDF is rendered by `reportlab` on the server, so there is nothing to fake. In Demo Mode the button explains that instead |
+| Labelling | Every fixture body opens with a `DEMO DATA` line; the eval chart PNG is watermarked `DEMO`; a persistent amber banner sits under the header |
+| Isolation | `app/page.tsx` keys the tab container on the flag, so toggling remounts every panel — a demo answer cannot be left on screen in live mode, or the reverse |
+
+Adding a backend endpoint means adding a fixture: an unrouted path throws rather than resolving to nothing.
+
+Result IDs in the fixtures are `4101` compliance, `4102` analyze, `4103` release_listing, `4104` release_check — `GET /result/4101` resolves, anything else returns the not-found shape.
+
+### Guided walkthroughs — `lib/content.ts::WALKTHROUGHS`, `components/Walkthrough.tsx`
+
+Four tours launched from the Start here tab, one per pipeline: `compliance` (7 steps), `analyze` (6), `release_listing` (6), `release_planner` (6). Starting one switches Demo Mode on; leaving Demo Mode ends the tour, so a walkthrough can never narrate live data.
+
+Each step carries `where` (the control's physical location), `action`, `expect` (what the fixtures will show), and one visual aid:
+
+| `visual.kind` | Renders as |
+|---|---|
+| `control` | A mock of the real control — tab strip, dropdown, textarea, date field, button, tick box or the Demo Mode switch — with an amber ring and an arrow |
+| `beforeAfter` | Two stacked states with an arrow, for steps whose point is what changes |
+| `flow` | The Release Planner's four stages with one lit; stage names are read from `PLANNER_STEPS`, not retyped |
+
+The dock is non-modal and collapsible, so the tab underneath stays usable.
+
+### Activity feed — `lib/activity.ts`, `components/ActivityFeed.tsx`
+
+Transient narration in the bottom-left corner, capped at 3 items, auto-dismissed 6 s after settling. Supplementary to each panel's own result display, never a replacement for it.
+
+`describeRequest(path, options)` is pure and returns the in-flight steps plus a closure that builds the completion line **from the actual response body** — which is why the feed reads identically in both modes:
+
+| Action | Completion line, and where the number comes from |
+|---|---|
+| Run an agent | `Compliance report ready. Scored 8/10…` — `eval.score`; a cache hit says so instead, off `from_cache` |
+| Upload a PDF | `Added 24 searchable pieces.` — `inserted_chunks` (`0` ⇒ "already in the knowledge base") |
+| Remove a document | `Removed 24 pieces.` — `deleted_chunks` |
+| Check holidays | `Found 2 clashes… for each of the 5 countries.` — counted off `conflict_report` |
+| Create calendar events | `Created 5 calendar events, one per country.` — `Object.keys(events).length` |
+| Load history | `Found 8 messages from earlier runs.` — `history.length` |
+
+Endpoints with no entry are silent — that is what keeps the 30-second health poll out of the feed. Copy lives in `content.ts::ACTIVITY_COPY`; the checks reject any user-visible step containing `hybrid`, `rerank`, `embed`, `vector`, `chunk`, `collection`, `A2A`, `pgvector`, `BM25`, `supervisor` or `endpoint`.
+
+### API log — `lib/apilog.ts`, `components/ApiLogPanel.tsx`
+
+A bottom drawer, off by default, toggled by the `{ }` pill in the header. Recording is always on (a 50-entry ring buffer), so the panel can be opened *after* something goes wrong and still show the call.
+
+One row per call: method chip, path, `simulated` badge for Demo Mode, status, duration, timestamp. Expanding a row (native `<details>`) shows headers, request payload and response body. Bodies are held by reference and only stringified on expand.
+
+**The API key is never printed.** `maskSecrets()` replaces the `NEXT_PUBLIC_API_KEY` value in headers, request payloads, error strings and response bodies, and the `X-API-Key` header is written as `••••••••` at the point of recording rather than at the point of display. This is a display safeguard only — the key is still inlined into the JS bundle (see [Known limitations](#security-notes)).
+
+Live entries settle with the real HTTP status from `liveRequest`; Demo Mode entries settle with `200` plus the `simulated` flag, which the row explains. An entry settles once, so the `catch` in `request<T>` cannot overwrite a status that was already recorded correctly. Every logging call is wrapped in `try/catch` — a logging failure can never fail a request that worked.
+
 ---
 
 ## Folder and File Structure
 
 ```
 agentic-studio/
-├── main.py                        FastAPI app: all 13 routes, CORS, date-scheduling orchestration
+├── main.py                        FastAPI app: all 19 routes, CORS, date-scheduling orchestration
 ├── agent4_service.py              Standalone A2A microservice: holiday/sport/awards conflict checking
 ├── supervisor.py                  LangGraph single-node router mapping task → agent function
 ├── agents.py                      The four task implementations + TMDB genre ID map
@@ -439,16 +596,35 @@ agentic-studio/
 ├── config.py                      Single point where every env var is read
 ├── calendar_service_account.py    Google Calendar via service account (default path)
 ├── calendar_mcp.py                Google Calendar via MCP stdio server (CALENDAR_MODE=mcp)
+├── test_release_conflicts.py      15 checks: release-date logic, retrieval confidence gate
+├── test_admin_tables.py           17 checks: admin registry, structural marking, identifier safety
 ├── requirements.txt               Pinned Python deps (UTF-16 encoded)
-├── ARCHITECTURE.md                Pre-existing 628-line design document
+├── ARCHITECTURE.md                Design document: per-file responsibilities, known limitations
 └── frontend/
-    ├── app/page.tsx               App shell: header, health poller, tab switching
-    ├── components/                One file per tab, plus ui.tsx for shared pieces
-    ├── lib/content.ts             All user-facing explanatory copy
+    ├── app/page.tsx               App shell: header, mode toggles, health poller, tab switching, overlays
     ├── app/layout.tsx             Root layout
     ├── app/globals.css            Tailwind entry + custom animations
-    ├── lib/api.ts                 Every backend call + TypeScript types mirroring the API
+    ├── components/
+    │   ├── GuidePanel.tsx         "Start here" tab + the four walkthrough launchers
+    │   ├── AgentsPanel.tsx        compliance / analyze / release_listing
+    │   ├── ReleasePlanner.tsx     The four-step release-date flow
+    │   ├── DocumentsPanel.tsx     Upload and remove PDFs
+    │   ├── HistoryPanel.tsx       Session turns + result lookup/download
+    │   ├── InsightsPanel.tsx      Faithfulness summary and chart
+    │   ├── DatabasePanel.tsx      Visual browser over the 5 tables
+    │   ├── DatabaseEditor.tsx     Add/edit form + delete confirmation for those tables
+    │   ├── Walkthrough.tsx        Guided-tour dock + its three visual-aid renderers
+    │   ├── ActivityFeed.tsx       Plain-language narration stack
+    │   ├── ApiLogPanel.tsx        Technical request/response drawer
+    │   └── ui.tsx                 Shared presentational pieces, no data fetching
+    ├── lib/api.ts                 Every backend call + the types mirroring the API
+    ├── lib/content.ts             All user-facing copy: task info, glossary, walkthroughs, narration
+    ├── lib/demo.ts                Demo Mode flag, fixtures, walkthrough state
+    ├── lib/activity.ts            Activity-feed store + describeRequest()
+    ├── lib/apilog.ts              API-log ring buffer + maskSecrets()
+    ├── lib/demo.test.ts           Frontend checks — `node lib/demo.test.ts`
     ├── package.json               Next 16 / React 19 / Tailwind 4
+    ├── tsconfig.json              `allowImportingTsExtensions` so the checks run under bare node
     └── next.config.ts             Empty config (defaults only)
 ```
 
@@ -485,7 +661,32 @@ It uses plain `assert` statements and a `__main__` runner, so it needs nothing i
 
 Coverage: the listing parser (including titles containing parentheses, and undated films), the 14-day competition window at its inclusive boundary, signed day offsets, same-day releases, and all four `retrieval_status` states — in particular that an unscored result is not mistaken for an irrelevant one.
 
-These are the only tests in the repo. The database, LLM, and A2A paths have no automated coverage.
+`test_admin_tables.py` — **17 checks, no framework required**:
+
+```bash
+python test_admin_tables.py
+```
+
+Covers the admin browser's validation layer: the registry is complete, an unregistered table is unreachable, the three documented invariants are marked structural, warnings fire only for structural columns, `documents` deletes by filename group and omits embeddings, and — the one that matters most — `_safe()` refuses every identifier that is not a plain identifier (`id; DROP TABLE results`, `a"b`, `id --`, `results.id`, …), since that is the only place a name is interpolated into SQL.
+
+Not covered, because they need a live database: `admin_columns` (reads `information_schema`), `_validate_writable`, and every statement that touches a real row.
+
+`frontend/lib/demo.test.ts` — **the frontend checks, also framework-free**:
+
+```bash
+cd frontend && node lib/demo.test.ts
+```
+
+Node ≥ 22.6 strips the TypeScript types natively, so this needs nothing installed either. Two consequences worth knowing: `tsconfig.json` sets `allowImportingTsExtensions` (safe under `noEmit`) because the test imports `./demo.ts` with its extension, and `lib/activity.ts` imports `./content.ts` relatively rather than through the `@/` alias, which bare node cannot resolve.
+
+Coverage:
+
+- **Demo Mode** — every path `lib/api.ts` can call has a fixture; an unrouted path rejects; fixtures label themselves as demo data; the calendar fixture's links point at a day view rather than an event id; an override does not stick to the fixture; the document list is frozen.
+- **Walkthroughs** — starting one forces Demo Mode on; leaving Demo Mode ends it; restarting rewinds it; all four pipelines exist and no step is missing a visual aid or a `where` line.
+- **Activity feed** — the ten narrated routes produce the expected outcome line *when fed the real fixtures*; the health poll and the eval chart stay silent; a cache hit says so; no user-visible step contains internal vocabulary; a malformed body does not throw.
+- **API log** — the API key is masked in headers, payloads and response bodies; an entry settles once; the buffer caps at 50.
+
+Between them these are the only tests in the repo. The database, LLM, A2A, calendar and ingestion paths have no automated coverage, and no test exercises a React component — the checks cover the stores and the pure functions the components read.
 
 ---
 
@@ -493,8 +694,17 @@ These are the only tests in the repo. The database, LLM, and A2A paths have no a
 
 Only issues discoverable from the code, its comments, or its error handling:
 
-**"system offline" badge in the UI, backend is running.**
-`frontend/lib/api.ts:3` defaults `API_URL` to `""`, so `checkHealth()` requests `/health` on the *frontend's* origin. Create `frontend/.env.local` with `NEXT_PUBLIC_API_URL` and restart `npm run dev` — `NEXT_PUBLIC_*` values are inlined at build/dev-server start, so editing them without a restart changes nothing.
+**"backend not reachable" badge in the UI, backend is running.**
+`frontend/lib/api.ts` defaults `API_URL` to `""`, so `checkHealth()` requests `/health` on the *frontend's* origin. Create `frontend/.env.local` with `NEXT_PUBLIC_API_URL` and restart `npm run dev` — `NEXT_PUBLIC_*` values are inlined at build/dev-server start, so editing them without a restart changes nothing.
+
+**Everything works but the answers look canned, or a `DEMO DATA` banner is showing.**
+Demo Mode is on — the header toggle is amber. Switch it off to reach the real backend. It also switches itself on whenever a guided walkthrough is started from the Start here tab.
+
+**A walkthrough step points at a control that is not there.**
+The `where` text in `content.ts::WALKTHROUGHS` describes real screen positions and nothing enforces that it stays true. If a control moved in `AgentsPanel.tsx` or `ReleasePlanner.tsx`, that step's text needs updating by hand.
+
+**`Demo Mode has no fixture for POST /some-path.`**
+A new endpoint was added to `lib/api.ts` without a matching entry in `lib/demo.ts::ROUTES`. Deliberate: a silently empty response would be worse. Add the fixture; `node lib/demo.test.ts` will tell you if any path is still uncovered.
 
 **All protected endpoints return `403 "Missing or invalid API key."`**
 `main.py::require_api_key` fails closed: if `API_SECRET_KEY` is unset on the server, *every* request is rejected regardless of what the client sends.
@@ -553,7 +763,7 @@ Override keys are validated against `SUPPORTED_COUNTRIES`. Because `main.py` and
 
 Stated because they are visible facts about the implementation, not speculation:
 
-1. **`NEXT_PUBLIC_API_KEY` is inlined into the client JS bundle.** Next.js exposes every `NEXT_PUBLIC_*` variable to the browser, so the deployed frontend ships `API_SECRET_KEY` to every visitor. `ARCHITECTURE.md` note 15 acknowledges this and suggests proxying through a server route.
+1. **`NEXT_PUBLIC_API_KEY` is inlined into the client JS bundle.** Next.js exposes every `NEXT_PUBLIC_*` variable to the browser, so the deployed frontend ships `API_SECRET_KEY` to every visitor. `ARCHITECTURE.md` note 15 acknowledges this and suggests proxying through a server route. The API log panel masks the value everywhere it could print it (`apilog.ts::maskSecrets`, asserted by the frontend checks), but that only stops the log from being the thing that puts a credential on someone's screen or in a pasted bug report — the underlying exposure is unchanged.
 2. **`ninth-wares-462308-f5-c99c6f0176a0.json` is not gitignored.** `.gitignore` covers `gcp-credentials.json` and `service-account-credentials.json` only. If this is a GCP key, one `git add .` commits it.
 3. **RLS is enabled with no policies.** `init_tables()` enables row-level security on all five tables but the codebase defines no policies — the app connects via `DATABASE_URL`, presumably as an owner/bypass role. Exact role: **Unknown / not found in codebase**.
 4. **Read endpoints are unauthenticated.** `/result/{id}`, `/result/{id}/download`, `/history/{session_id}`, `/eval/summary`, and `/eval/chart` carry no `require_api_key` dependency, and result IDs are sequential integers.

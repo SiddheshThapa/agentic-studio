@@ -10,12 +10,14 @@ import {
   ErrorAlert,
   Explain,
   Field,
+  PanelIntro,
   PrimaryButton,
-  Spinner,
+  SecondaryButton,
+  Skeleton,
   errorMessage,
   inputClass,
 } from "@/components/ui";
-import { GLOSSARY } from "@/lib/content";
+import { GLOSSARY, PANEL_COPY } from "@/lib/content";
 
 export default function HistoryPanel() {
   const [sessionId, setSessionId] = useState("web-session");
@@ -79,15 +81,20 @@ export default function HistoryPanel() {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-      <Card className="space-y-5">
-        <div>
-          <h2 className="font-semibold">Conversation history</h2>
-          <p className="mt-1 text-sm text-slate-500">
-            Everything run under one session ID
-            <Explain term="session ID">{GLOSSARY.sessionId}</Explain>
-          </p>
-        </div>
+    <div className="space-y-8">
+      <PanelIntro eyebrow={PANEL_COPY.history.eyebrow} title={PANEL_COPY.history.title}>
+        {PANEL_COPY.history.intro}
+      </PanelIntro>
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card className="space-y-5">
+          <div>
+            <h3 className="text-title font-semibold text-ink-50">{PANEL_COPY.sectionHistory}</h3>
+            <p className="mt-1.5 text-label leading-relaxed text-ink-400">
+              Everything run under one session ID
+              <Explain term="session ID">{GLOSSARY.sessionId}</Explain>
+            </p>
+          </div>
 
         <Field
           label="Session ID"
@@ -123,31 +130,39 @@ export default function HistoryPanel() {
         )}
 
         {history.length > 0 && (
-          <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+          <div className="max-h-96 space-y-2.5 overflow-y-auto pr-1">
             {history.map((h, i) => (
-              <div key={i} className="animate-fade-in-up flex gap-3 border-b border-slate-800/60 pb-2">
+              <div
+                key={i}
+                style={{ "--i": Math.min(i, 8) } as React.CSSProperties}
+                className="stagger flex gap-3 rounded-[var(--radius-control)] border border-white/5 bg-white/[0.02] p-3"
+              >
                 <span
-                  className={`h-fit shrink-0 rounded-full px-2 py-0.5 text-xs ${
-                    h.role === "user" ? "bg-blue-950 text-blue-400" : "bg-violet-950 text-violet-400"
+                  className={`h-fit shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                    h.role === "user"
+                      ? "border-white/10 bg-white/5 text-ink-300"
+                      : "border-iris-400/25 bg-iris-400/10 text-iris-200"
                   }`}
                 >
                   {h.role === "user" ? "you" : "agent"}
                 </span>
-                <span className="min-w-0 break-words text-sm text-slate-400">{h.content}</span>
+                <span className="min-w-0 break-words text-label leading-relaxed text-ink-300">
+                  {h.content}
+                </span>
               </div>
             ))}
           </div>
         )}
-      </Card>
+        </Card>
 
-      <Card className="space-y-5">
-        <div>
-          <h2 className="font-semibold">Look up a saved answer</h2>
-          <p className="mt-1 text-sm text-slate-500">
-            Every answer gets a number when it is produced. Enter it here to read it again or save it as
-            a PDF.
-          </p>
-        </div>
+        <Card className="space-y-5">
+          <div>
+            <h3 className="text-title font-semibold text-ink-50">{PANEL_COPY.sectionLookup}</h3>
+            <p className="mt-1.5 text-label leading-relaxed text-ink-400">
+              Every answer gets a number when it is produced. Enter it here to read it again or save it
+              as a PDF.
+            </p>
+          </div>
 
         <Field label="Result ID" help="Digits only — the number shown as “Result #42” next to an answer." example="42">
           <div className="flex gap-2">
@@ -165,34 +180,41 @@ export default function HistoryPanel() {
         </Field>
 
         {lookupId && !idIsValid && (
-          <p className="text-xs text-amber-400">Result IDs are plain numbers, like 42.</p>
-        )}
-        {lookupError && <ErrorAlert message={lookupError} />}
+            <p className="text-xs text-amber-300">Result IDs are plain numbers, like 42.</p>
+          )}
+          {lookupError && <ErrorAlert message={lookupError} />}
 
-        {!lookupResult && !lookupError && (
-          <EmptyState
-            title="No answer loaded"
-            hint="Enter the number shown beside an answer on the Agents tab to pull it back up."
-          />
-        )}
+          {/* Fetching shows the shape of the answer that is coming, not a spinner
+              in an empty box — the panel does not resize when it lands. */}
+          {lookupLoading && (
+            <div className="space-y-2.5">
+              <Skeleton className="h-6 w-24" />
+              <Skeleton className="h-3 w-full" />
+              <Skeleton className="h-3 w-11/12" />
+              <Skeleton className="h-3 w-4/5" />
+            </div>
+          )}
 
-        {lookupResult && (
-          <div className="animate-fade-in-up space-y-3">
-            <Badge tone="blue">{lookupResult.task}</Badge>
-            <p className="max-h-64 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-slate-300">
-              {lookupResult.result}
-            </p>
-            <button
-              onClick={handleDownload}
-              disabled={downloading}
-              className="inline-flex items-center gap-2 text-xs text-slate-500 transition-colors hover:text-blue-400 disabled:opacity-40"
-            >
-              {downloading && <Spinner />}
-              Download as PDF
-            </button>
-          </div>
-        )}
-      </Card>
+          {!lookupResult && !lookupError && !lookupLoading && (
+            <EmptyState
+              title="No answer loaded"
+              hint="Enter the number shown beside an answer on the Agents tab to pull it back up."
+            />
+          )}
+
+          {lookupResult && !lookupLoading && (
+            <div className="animate-fade-in-up space-y-3.5">
+              <Badge tone="blue">{lookupResult.task}</Badge>
+              <p className="max-h-64 overflow-y-auto whitespace-pre-wrap text-body text-ink-200">
+                {lookupResult.result}
+              </p>
+              <SecondaryButton onClick={handleDownload} disabled={downloading} loading={downloading}>
+                Download as PDF
+              </SecondaryButton>
+            </div>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }

@@ -423,6 +423,53 @@ countries' dates — is the step that actually creates them. Both paths
 end up calling the same underlying helpers and produce calendar events
 adjusted around whatever conflicts Agent 4 reports for each country.
 
+### Admin table browser (main.py + database.py)
+GET /admin/tables, GET /admin/tables/{table},
+GET|PATCH|DELETE /admin/tables/{table}/{row_id}, POST /admin/tables/{table}
+— generic list/read/create/update/delete over the five tables, for an
+admin UI that does not know the schema in advance. The SQL lives in
+database.py with every other query and uses the same pool helpers; no
+second connection strategy was introduced.
+
+Unlike the app's other read endpoints, the whole prefix requires an API
+key. /result/{id} exposes one known row; GET /admin/tables/memory
+exposes every session anyone has ever run, which is a different kind of
+exposure.
+
+Generic SQL over user-named tables is the one place in this codebase
+where an identifier reaches a statement, so two rules bound it:
+- Table names come only from database.py's ADMIN_TABLES registry.
+- Column names are validated against information_schema.columns for
+  that table — the live schema rather than a hardcoded list, since the
+  schema is created with CREATE TABLE IF NOT EXISTS and has been
+  hand-altered before (see the dropped columns in PROJECT_GUIDE.md).
+Both must then match _safe()'s ^[A-Za-z_][A-Za-z0-9_]*$ before being
+quoted. Every value is a bound parameter; ORDER BY clauses are literals
+held in the registry.
+
+Columns that other code reads for meaning rather than as data are marked
+`structural` in the response with a note naming what depends on them —
+results.script_text (the "<date>|<listing_result_id>" carrier),
+memory.created_at and memory.id (the ordering pair memory_get needs),
+cache.created_at (the source of the 24h TTL, which is computed in SQL
+and not stored), cache.question (a sha256 digest, not question text),
+documents.embedding and documents.metadata. Editing them is deliberately
+not blocked at the API layer; a write that touches one returns a
+structural_warnings array instead.
+
+Two behaviours differ from a plain row editor:
+- documents.embedding is omitted from row payloads (768 floats per
+  chunk), but still listed in the column metadata as omitted.
+- Deleting a documents row deletes every chunk sharing its
+  metadata->>'filename', through the same delete_documents_by_filename
+  path DELETE /document uses, because one uploaded PDF is many chunk
+  rows. A chunk with no filename is refused rather than deleted alone.
+
+Checks: test_admin_tables.py (17, no framework) covers the registry, the
+structural marking, and _safe()'s rejection of anything that is not a
+plain identifier. Everything that reads information_schema or a real row
+needs a live database and is not covered.
+
 ### frontend/ [Next.js 16 App Router, React 19, Tailwind 4]
 A single-page dashboard that is the only client of main.py's API — it
 calls the backend directly from the browser (via CORS) rather than
@@ -434,20 +481,43 @@ checkConflicts, finalizeCalendar, ingestDocument, deleteDocument,
 getResult, downloadResult, getHistory, getEvalSummary, getEvalChart)
 plus the request-mirroring TypeScript types (AgentResponse,
 ConflictReport, DateConfirmationResponse, ConflictCheckResponse, etc.).
-A single `request<T>` helper attaches `X-API-Key` (from
+
+Because every call funnels through one `request<T>` helper, that helper
+is also the single seam the three client-side features below hook into.
+Its order of operations is:
+
+  1. narrateRequest(path, options)  → plain-language activity feed
+  2. logApiStart(path, options, …)  → technical API log
+  3. isDemo() ? demoRequest(…) : liveRequest(…)
+  4. activity.finish(body) / logApiEnd(id, …) — both fed the response
+     body, so both report the same facts in either mode
+  5. on throw: activity.fail(), logApiEnd(…, ok: false), rethrow
+
+liveRequest is the original network path: it attaches `X-API-Key` (from
 NEXT_PUBLIC_API_KEY) when a call is marked `authed`, reads
 NEXT_PUBLIC_API_URL as the backend base URL, and normalizes both
 network failures and non-OK responses into a thrown `ApiError` carrying
 the HTTP status and a message extracted from the response body's
-`detail`/`error` field.
+`detail`/`error` field. It settles its own log entry, because that is
+where the real HTTP status exists.
+
+downloadResult is the one call that does not go through `request<T>`
+(it wants a blob, not JSON), so it starts its own activity and log
+entries by hand.
 
 frontend/app/page.tsx — the app shell only: header, health-check pill
 polling GET /health every 30s, an offline banner giving the commands to
-start the backend, and tab switching. Each tab lives in its own file
-under frontend/components/, with shared presentational pieces in
-components/ui.tsx and every sentence of user-facing explanation in
-lib/content.ts (which mirrors backend constants — GENRES must match
-agents.py's GENRE_IDS, MIN_SCRIPT_CHARS must match main.py's min_length).
+start the backend, the Demo Mode and API log toggles, and tab switching.
+Each tab lives in its own file under frontend/components/, with shared
+presentational pieces in components/ui.tsx and every sentence of
+user-facing explanation in lib/content.ts (which mirrors backend
+constants — GENRES must match agents.py's GENRE_IDS, MIN_SCRIPT_CHARS
+must match main.py's min_length).
+
+Three overlays are mounted by the shell rather than by any tab, and
+deliberately sit OUTSIDE the container keyed on Demo Mode (see below),
+so switching modes cannot unmount them mid-flight: ActivityFeed,
+Walkthrough, and ApiLogPanel.
 - GuidePanel — "Start here": what the tool does, the suggested order of
   the other tabs, and a glossary (chunk, collection, session ID,
   faithfulness, result ID).
@@ -474,17 +544,106 @@ agents.py's GENRE_IDS, MIN_SCRIPT_CHARS must match main.py's min_length).
 - InsightsPanel — GET /eval/summary and GET /eval/chart (rendered as a
   base64 PNG `<img>`), with a manual refresh button and a plain-language
   reading of what the average score means.
+- DatabasePanel — the admin API's read-only consumer, for someone who does
+  not think in tables. No JSON and no cell grid: each collection is drawn
+  the way its contents are shaped. Uploads become file cards holding their
+  chunks; answers become expandable summary cards; memory becomes a
+  conversation per session (rows arrive newest-first and are reversed so a
+  reply sits under its question); cache entries show a fresh/expired read
+  computed from created_at + 24h; scores reuse InsightsPanel's thresholds
+  so one number never reads two ways. Search and paging are server-side.
+  Structural columns get a "used internally" chip — the API says which
+  columns, DATABASE_COPY.structuralLabels says how to phrase it, because
+  the backend's own notes name endpoints and are written for engineers.
+  documents is fetched at the API's 200-row cap since grouping half a file
+  reads as a bug; the grouping note says so when there is more.
+- DatabaseEditor — add/edit/delete for those same tables. One form built
+  from the API's column metadata serves both adding and editing; adding
+  hides columns the database defaults (serial ids, NOW()), editing shows
+  every readable column so a structural one is never unreachable.
+  Structural fields are gated, not blocked: the input starts disabled,
+  unlocking it is its own confirmation naming what breaks, and saving a
+  changed structural field asks once more listing each one. Deletes state
+  their consequence before they happen, and a documents delete says how
+  many pieces of which file go with it. Every write bumps a counter that
+  is part of the list fetch's request key, so the rows and the per-table
+  counts are refetched rather than patched locally.
+
+#### Client-side features layered on lib/api.ts
+
+None of the four below required changes to the tab components. They are
+observers (or a substitute) for the shared `request<T>` seam, each with
+its own module-level store read through useSyncExternalStore. None of
+them persists anything: every flag is off again on reload.
+
+frontend/lib/demo.ts — **Demo Mode.** A module-level boolean plus a
+fixture table covering every endpoint the app calls. When on,
+`request<T>` resolves against `demoRequest()` and no socket is opened:
+no backend, no Gemini quota (capped at 20 calls/day, limitation 12), and
+no Google Calendar writes. A path with no fixture throws rather than
+resolving to nothing, so adding an endpoint means adding a fixture.
+Fixture bodies each begin with a "DEMO DATA" line and the eval chart is
+a PNG watermarked DEMO, so a screenshot or a pasted paragraph carries
+the label with it. page.tsx keys the tab container on the flag, which
+remounts every panel on toggle — that is what stops a demo answer from
+being left on screen in live mode, or vice versa. The same store holds
+which guided walkthrough is running, because leaving Demo Mode must end
+it.
+
+frontend/lib/activity.ts + components/ActivityFeed.tsx — **plain-language
+activity feed.** `describeRequest()` maps a path to the steps shown while
+the call is in flight and to a closure that builds the completion line
+from the actual response body — "Created 5 calendar events" is counted
+off `Object.keys(events)`, "Added 24 searchable pieces" off
+`inserted_chunks`. That is what makes the narration identical in Demo
+Mode and live: same code, whichever body arrives. Routes with no entry
+are silent, which is what keeps the 30-second health poll out of the
+feed. Copy lives in content.ts::ACTIVITY_COPY and is written for a
+beginner — no internal vocabulary (see limitation 18).
+
+frontend/lib/apilog.ts + components/ApiLogPanel.tsx — **technical API
+log.** A 50-entry ring buffer of method, endpoint, headers, request
+payload, status, duration and response body, rendered as native
+`<details>` rows. Demo Mode calls are logged the same way and flagged
+`simulated`. Recording is always on so the panel can be opened after
+something goes wrong; the panel itself is off by default. `maskSecrets()`
+replaces NEXT_PUBLIC_API_KEY wherever it could appear — the `X-API-Key`
+header, any header matching /api[-_]?key|authorization/i, request
+payloads, error strings and response bodies (see limitation 15).
+Response bodies are held by reference and only stringified when a row is
+expanded, and every logging entry point is wrapped so a logging failure
+cannot fail a request that worked.
+
+frontend/lib/content.ts::WALKTHROUGHS + components/Walkthrough.tsx —
+**guided walkthroughs.** Four narrated tours, one per pipeline
+(compliance, analyze, release_listing, and the four-step Release
+Planner), launched from GuidePanel. Starting one forces Demo Mode on.
+Each step names the exact control to use and carries one of three visual
+aids — `control` (a ringed, arrowed mock of the real control),
+`beforeAfter` (a state change), or `flow` (the planner's four stages
+with one lit, labels reused from PLANNER_STEPS). The dock is non-modal
+and collapsible, so the tab underneath stays usable.
 
 Lint note: the React 19 config enforces react-hooks/set-state-in-effect,
 so a bare setState() in an effect body fails the build. Fetch inside an
 inline async IIFE with a `cancelled` guard, or use useSyncExternalStore
-for external stores.
+for external stores. Every store above is shaped for the latter — the
+timers belong to the stores, not to components, which is why none of the
+overlay components runs an effect at all.
+
+Frontend checks: `node lib/demo.test.ts` from frontend/ — plain asserts,
+no framework, no test runner installed. Node ≥ 22.6 strips the types.
+This is why tsconfig.json sets `allowImportingTsExtensions` (safe under
+`noEmit`) and why lib/activity.ts imports "./content.ts" relatively
+rather than via the "@/" alias, which bare node cannot resolve.
 
 Environment: frontend/.env.local sets NEXT_PUBLIC_API_URL (the FastAPI
 base URL, e.g. `http://localhost:8000`) and NEXT_PUBLIC_API_KEY (must
 match main.py's API_SECRET_KEY). Both are Next.js "public" env vars, so
 they are inlined into the client-side JS bundle at build time — see
-Known Limitations for what this means for the API key.
+Known Limitations for what this means for the API key. Demo Mode needs
+neither: the frontend runs standalone against fixtures with no .env.local
+and no backend process at all.
 
 ---
 
@@ -632,10 +791,46 @@ main.py receives a request
     — deploying the frontend publicly as-is would leak API_SECRET_KEY to
     every visitor. Mitigating this would require proxying authenticated
     calls through a Next.js server route (or a separate backend-for-
-    frontend) that holds the key server-side instead.
+    frontend) that holds the key server-side instead. The API log panel
+    masks the key everywhere it could print it (apilog.ts::maskSecrets),
+    but that is only so the log is not the thing that puts a credential
+    on screen — it is not a fix for the underlying exposure.
 16. CORS on main.py is currently locked to `http://localhost:3000` only;
     deploying the frontend to any other origin requires updating
     `allow_origins` in main.py's CORSMiddleware setup.
+17. The activity feed's in-flight steps advance on a 1.4 s timer, not on
+    real backend progress — FastAPI returns one response per call, not a
+    stream. The steps state what the system genuinely does for that
+    endpoint, but not when each part of it finishes. Only the final line
+    is derived from the actual response. Server-sent events from main.py
+    would be the honest fix.
+18. The walkthrough steps and the activity-feed copy both describe the UI
+    and the pipeline in prose, and nothing enforces that they stay true.
+    Moving a control in AgentsPanel or ReleasePlanner silently invalidates
+    the matching step's `where` text. The frontend checks cover structure
+    (every step has a visual; no step uses internal vocabulary), not
+    accuracy.
+19. Demo Mode's fixtures are hand-written, so they drift from the real
+    response shapes if an endpoint's contract changes. Nothing compares
+    them against the backend's pydantic models; the checks only assert
+    that every path the client calls has a fixture at all.
+20. The admin browser's structural markings are a hand-maintained list in
+    ADMIN_TABLES. Nothing enforces that it stays in step with the code
+    that actually depends on those columns — a new invariant added
+    elsewhere is not automatically marked here, and a marking left behind
+    after an invariant is removed still warns. The three the API was
+    built around are covered by test_admin_tables.py.
+21. The admin browser's write endpoints let an authenticated caller edit
+    or delete any row in any of the five tables, including the columns
+    marked structural. That is the requested behaviour — the warnings are
+    advisory, not enforcement — but it means the API key now grants
+    strictly more than it did: previously no endpoint could rewrite a
+    stored result or drop a cache row. There is no audit trail beyond the
+    stdout log line each delete writes.
+22. Admin list responses run COUNT(*) over the whole table on every page
+    request. Fine at this project's scale, wrong at any other; a keyset
+    cursor would replace both the count and the OFFSET, which also
+    degrades as offset grows.
 
 ---
 
@@ -681,3 +876,8 @@ main.py receives a request
    main.py's API_SECRET_KEY), then `npm run dev` — it serves on
    `http://localhost:3000` by default, which is the only origin main.py's
    CORS policy currently allows.
+7. Nothing in steps 1–6 is needed to look at the frontend: `npm install`
+   and `npm run dev`, then switch Demo Mode on in the header. Every tab
+   works against local fixtures with no database, no API keys, no Agent 4
+   and no calendar. That is also the only safe way to demonstrate the
+   Release Planner, whose final step writes real calendar events.

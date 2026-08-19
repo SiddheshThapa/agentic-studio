@@ -20,12 +20,14 @@ import {
   Card,
   ErrorAlert,
   InfoNote,
+  PanelIntro,
   PrimaryButton,
   StepHeader,
   errorMessage,
   inputClass,
 } from "@/components/ui";
-import { GENRES, PLANNER_STEPS, countryName } from "@/lib/content";
+import { DEMO_COPY, GENRES, PANEL_COPY, PLANNER_STEPS, countryName } from "@/lib/content";
+import { isDemo } from "@/lib/demo";
 
 function todayPlus(days: number): string {
   const d = new Date();
@@ -124,14 +126,24 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
-      <Card className="space-y-2">
-        <h2 className="font-semibold">Release Date Planner</h2>
-        <p className="text-sm leading-relaxed text-slate-400">
-          Four steps. Each one feeds the next, so work down the page. Nothing leaves this app until the
-          final step, which creates real Google Calendar events.
-        </p>
-      </Card>
+    <div className="mx-auto max-w-3xl space-y-6">
+      <PanelIntro eyebrow={PANEL_COPY.planner.eyebrow} title={PANEL_COPY.planner.title}>
+        {PANEL_COPY.planner.intro}
+      </PanelIntro>
+
+      {/* Progress rail: four dots that fill as the flow advances, so the shape of
+          the process is visible before any of it has been done. */}
+      <div className="flex items-center gap-2" aria-hidden>
+        {[1, 2, 3, 4].map((n) => (
+          <div key={n} className="flex flex-1 items-center gap-2">
+            <span
+              className={`h-1 flex-1 rounded-full transition-colors duration-[var(--duration-slow)] ${
+                step > n ? "bg-emerald-400/70" : step === n ? "bg-iris-400" : "bg-white/8"
+              }`}
+            />
+          </div>
+        ))}
+      </div>
 
       {error && <ErrorAlert message={error} />}
 
@@ -169,12 +181,13 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
         </div>
 
         {listing && (
-          <div className="animate-fade-in-up pl-10">
-            <details className="rounded-lg border border-slate-800 bg-slate-950/60">
-              <summary className="cursor-pointer px-3 py-2 text-xs text-slate-400 hover:text-slate-200">
-                {listing.text.split("\n").length} {genre} films already scheduled — click to view
+          <div className="animate-fade-in-up pl-11">
+            <details className="group rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02]">
+              <summary className="flex cursor-pointer items-center gap-2 px-3.5 py-2.5 text-xs text-ink-300 hover:text-ink-50">
+                <span className="text-ink-600 transition-transform group-open:rotate-90">›</span>
+                {listing.text.split("\n").length} {genre} films already scheduled
               </summary>
-              <pre className="max-h-56 overflow-auto whitespace-pre-wrap px-3 pb-3 text-xs leading-relaxed text-slate-500">
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap px-3.5 pb-3.5 font-mono text-xs leading-relaxed text-ink-400">
                 {listing.text}
               </pre>
             </details>
@@ -190,7 +203,7 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
           why={PLANNER_STEPS[1].why}
           state={competition ? "done" : step === 2 ? "active" : "locked"}
         />
-        <div className="space-y-2 pl-10">
+        <div className="space-y-2 pl-11">
           <div className="flex flex-col gap-2 sm:flex-row">
             <input
               type="date"
@@ -213,19 +226,19 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
               Check competition
             </PrimaryButton>
           </div>
-          <p className="text-xs text-slate-600">
+          <p className="text-xs text-ink-500">
             Pick the date you would ideally release on. You can change it and re-run as often as you
             like — nothing is committed yet.
           </p>
         </div>
 
         {competition && (
-          <div className="animate-fade-in-up pl-10">
-            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-              <p className="mb-1.5 text-xs font-medium text-slate-400">
-                Films releasing within two weeks of {proposedDate}
+          <div className="animate-fade-in-up pl-11">
+            <div className="rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02] p-3.5">
+              <p className="mb-2 text-micro font-medium uppercase text-ink-500">
+                Within two weeks of {proposedDate}
               </p>
-              <p className="whitespace-pre-wrap text-xs leading-relaxed text-slate-400">
+              <p className="whitespace-pre-wrap text-xs leading-relaxed text-ink-300">
                 {competition.text}
               </p>
             </div>
@@ -241,7 +254,7 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
           why={PLANNER_STEPS[2].why}
           state={conflicts ? "done" : step === 3 ? "active" : "locked"}
         />
-        <div className="pl-10">
+        <div className="pl-11">
           {!conflicts ? (
             <PrimaryButton
               onClick={loadConflicts}
@@ -269,10 +282,10 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
         />
 
         {conflicts && !created && (
-          <div className="animate-fade-in-up space-y-3 pl-10">
-            <p className="text-xs text-slate-500">
+          <div className="animate-fade-in-up space-y-3.5 pl-11">
+            <p className="text-xs leading-relaxed text-ink-400">
               Each country gets its own date because holidays differ. A suggested date that moved away
-              from your proposal is marked <span className="text-amber-400">adjusted</span>; change any
+              from your proposal is marked <span className="text-amber-300">adjusted</span>; change any
               of them if you disagree.
             </p>
             <div className="space-y-2">
@@ -281,16 +294,21 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
                 const editedByUser = value !== recommended;
                 const movedByAgent = recommended !== conflicts.proposed_date;
                 return (
-                  <div key={code} className="flex flex-wrap items-center gap-2">
-                    <span className="w-32 shrink-0 text-sm text-slate-300">{countryName(code)}</span>
+                  <div
+                    key={code}
+                    className="flex flex-wrap items-center gap-2 rounded-[var(--radius-control)] border border-white/5 bg-white/[0.02] p-2 transition-colors duration-[var(--duration-base)] hover:border-white/10"
+                  >
+                    <span className="w-32 shrink-0 pl-1.5 text-label text-ink-200">
+                      {countryName(code)}
+                    </span>
                     <input
                       type="date"
                       value={value}
                       onChange={(e) => setDates((prev) => ({ ...prev, [code]: e.target.value }))}
-                      className={`flex-1 rounded-lg border bg-slate-950 px-3 py-1.5 text-sm text-slate-100 outline-none transition-colors ${
+                      className={`flex-1 rounded-[var(--radius-control)] border bg-ink-950/60 px-3 py-2 text-label text-ink-50 outline-none transition-colors duration-[var(--duration-base)] ${
                         editedByUser
-                          ? "border-blue-600 focus:border-blue-500"
-                          : "border-slate-800 focus:border-blue-600"
+                          ? "border-iris-400/60 focus:border-iris-400"
+                          : "border-white/8 focus:border-iris-400/60"
                       }`}
                     />
                     {editedByUser ? (
@@ -307,11 +325,15 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
               })}
             </div>
 
-            <InfoNote tone="amber">
-              This is the only step that changes anything outside this app. Confirming creates one real
-              event per country on the shared Google Calendar. There is no undo button here — you would
-              have to delete them in Google Calendar.
-            </InfoNote>
+            {isDemo() ? (
+              <InfoNote tone="amber">{DEMO_COPY.calendarNote}</InfoNote>
+            ) : (
+              <InfoNote tone="amber">
+                This is the only step that changes anything outside this app. Confirming creates one
+                real event per country on the shared Google Calendar. There is no undo button here —
+                you would have to delete them in Google Calendar.
+              </InfoNote>
+            )}
 
             <PrimaryButton
               onClick={createEvents}
@@ -326,28 +348,34 @@ export default function ReleasePlanner({ sessionId = "web-session" }: { sessionI
         )}
 
         {created && (
-          <div className="animate-fade-in-up space-y-3 pl-10">
-            <p className="text-sm text-emerald-400">
-              Done — {Object.keys(created.events).length} events created. Click any one to open it in
-              Google Calendar.
-            </p>
+          <div className="animate-fade-in-up space-y-3.5 pl-11">
+            <div className="flex items-center gap-2.5 rounded-[var(--radius-control)] border border-emerald-400/25 bg-emerald-400/[0.07] px-3.5 py-3">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-400/15 text-xs text-emerald-300">
+                ✓
+              </span>
+              <p className="text-label text-emerald-100">
+                {Object.keys(created.events).length} events created. Click any one to open it in Google
+                Calendar.
+              </p>
+            </div>
             <div className="space-y-2">
-              {Object.entries(created.events).map(([code, info]) => (
+              {Object.entries(created.events).map(([code, info], i) => (
                 <a
                   key={code}
                   href={info.calendar_event}
                   target="_blank"
                   rel="noreferrer"
-                  className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm transition-colors hover:border-blue-700"
+                  style={{ "--i": i } as React.CSSProperties}
+                  className="stagger surface-interactive flex items-center justify-between rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02] px-3.5 py-2.5 text-label"
                 >
-                  <span className="text-slate-300">{countryName(code)}</span>
-                  <span className="text-blue-400">{info.date} →</span>
+                  <span className="text-ink-200">{countryName(code)}</span>
+                  <span className="font-mono text-iris-300">{info.date} →</span>
                 </a>
               ))}
             </div>
             <button
               onClick={reset}
-              className="text-xs text-slate-500 underline underline-offset-2 hover:text-slate-300"
+              className="text-xs text-ink-400 underline underline-offset-4 transition-colors hover:text-ink-100"
             >
               Plan another release
             </button>
@@ -365,45 +393,45 @@ function ConflictFindings({ report }: { report: ConflictReport }) {
   const total = holidayConflicts + eventConflicts;
 
   return (
-    <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-sm text-slate-300">
+    <div className="space-y-4 rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02] p-4">
+      <div className="flex items-center justify-between gap-2 border-b border-white/5 pb-3">
+        <p className="text-label text-ink-100">
           {total === 0
             ? "No clashes found on your date."
             : `${total} clash${total === 1 ? "" : "es"} found within 3 days of your date.`}
         </p>
-        <Badge tone={total === 0 ? "emerald" : "amber"}>{total === 0 ? "all clear" : "needs a shift"}</Badge>
+        <Badge tone={total === 0 ? "emerald" : "amber"}>
+          {total === 0 ? "all clear" : "needs a shift"}
+        </Badge>
       </div>
 
-      <div className="space-y-1.5">
-        <p className="text-xs font-medium uppercase tracking-wide text-slate-600">Public holidays</p>
+      <div className="space-y-2">
+        <p className="text-micro font-medium uppercase text-ink-500">Public holidays</p>
         {Object.entries(report.holidays).map(([code, h]) => (
           <div key={code} className="flex items-center justify-between gap-2 text-xs">
-            <span className="text-slate-500">{countryName(code)}</span>
+            <span className="text-ink-300">{countryName(code)}</span>
             {h.status === "unknown" ? (
-              <span className="text-slate-600" title="The holiday service could not be reached">
+              <span className="text-ink-500" title="The holiday service could not be reached">
                 could not check
               </span>
             ) : h.conflict ? (
-              <span className="text-amber-400">
-                {h.holiday_name} · {h.holiday_date}
+              <span className="text-amber-300">
+                {h.holiday_name} · <span className="font-mono">{h.holiday_date}</span>
               </span>
             ) : (
-              <span className="text-emerald-500">clear</span>
+              <span className="text-emerald-400">clear</span>
             )}
           </div>
         ))}
       </div>
 
-      <div className="space-y-1.5">
-        <p className="text-xs font-medium uppercase tracking-wide text-slate-600">
-          Sporting events and awards
-        </p>
+      <div className="space-y-2">
+        <p className="text-micro font-medium uppercase text-ink-500">Sporting events and awards</p>
         {globalEvents.map((e) => (
           <div key={e.name} className="flex items-center justify-between gap-2 text-xs">
-            <span className="text-slate-500">{e.name}</span>
-            <span className={e.conflict ? "text-amber-400" : "text-emerald-500"}>
-              {e.date} · {e.days_away} days away
+            <span className="text-ink-300">{e.name}</span>
+            <span className={e.conflict ? "text-amber-300" : "text-emerald-400"}>
+              <span className="font-mono">{e.date}</span> · {e.days_away} days away
             </span>
           </div>
         ))}

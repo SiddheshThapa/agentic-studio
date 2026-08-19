@@ -13,12 +13,13 @@ import {
   Explain,
   Field,
   InfoNote,
+  PanelIntro,
   PrimaryButton,
-  Spinner,
+  SecondaryButton,
   errorMessage,
   inputClass,
 } from "@/components/ui";
-import { GENRES, GLOSSARY, MIN_SCRIPT_CHARS, TASK_INFO } from "@/lib/content";
+import { GENRES, GLOSSARY, MIN_SCRIPT_CHARS, PANEL_COPY, TASK_INFO } from "@/lib/content";
 
 type ScriptTask = "compliance" | "analyze" | "release_listing";
 
@@ -83,71 +84,82 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-      <div className="space-y-6">
-        <Card className="space-y-5">
-          <div>
-            <h2 className="font-semibold">1. Choose what you want done</h2>
-            <p className="mt-1 text-sm text-slate-500">
-              Each option is a different agent with different inputs.
-            </p>
-          </div>
+    <div className="space-y-8">
+      <PanelIntro eyebrow={PANEL_COPY.agents.eyebrow} title={PANEL_COPY.agents.title}>
+        {PANEL_COPY.agents.intro}
+      </PanelIntro>
 
-          <div className="space-y-2">
-            {(Object.keys(TASK_INFO) as ScriptTask[]).map((key) => {
-              const t = TASK_INFO[key];
-              const active = task === key;
-              return (
-                <button
-                  key={key}
-                  onClick={() => switchTask(key)}
-                  className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${
-                    active
-                      ? "border-blue-500 bg-blue-950/40"
-                      : "border-slate-800 hover:border-slate-700"
-                  }`}
-                >
-                  <div className={`text-sm font-medium ${active ? "text-blue-200" : "text-slate-300"}`}>
-                    {t.label}
-                  </div>
-                  <div className="mt-0.5 text-xs text-slate-500">{t.tagline}</div>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-            <p className="text-sm leading-relaxed text-slate-400">{info.whatItDoes}</p>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">You get back</p>
-              <ul className="mt-1.5 space-y-1">
-                {info.youGetBack.map((line) => (
-                  <li key={line} className="flex gap-2 text-xs text-slate-400">
-                    <span className="text-slate-600">•</span>
-                    {line}
-                  </li>
-                ))}
-              </ul>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="space-y-6">
+          <Card className="space-y-5">
+            <div className="flex items-baseline gap-2.5">
+              <span className="text-micro font-medium text-iris-300/70">01</span>
+              <h3 className="text-title font-semibold text-ink-50">{PANEL_COPY.sectionChoose}</h3>
             </div>
-            {info.requires && (
-              <InfoNote tone="amber">
-                {info.requires}{" "}
-                <button
-                  onClick={() => onGo("Documents")}
-                  className="underline underline-offset-2 hover:text-amber-100"
-                >
-                  Go to Documents
-                </button>
-              </InfoNote>
-            )}
-          </div>
-        </Card>
 
-        <Card className="space-y-5">
-          <div>
-            <h2 className="font-semibold">2. Give it what it needs</h2>
-            <p className="mt-1 text-sm text-slate-500">{info.youProvide}</p>
-          </div>
+            {/* Selected task is the only iris surface on this side of the screen,
+                so what you are about to run is never ambiguous. */}
+            <div className="space-y-2">
+              {(Object.keys(TASK_INFO) as ScriptTask[]).map((key) => {
+                const t = TASK_INFO[key];
+                const active = task === key;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => switchTask(key)}
+                    aria-pressed={active}
+                    className={`press w-full rounded-[var(--radius-control)] border px-4 py-3.5 text-left ${
+                      active
+                        ? "border-iris-400/50 bg-iris-400/10 shadow-[0_0_24px_-8px_rgb(124_107_255/0.55)]"
+                        : "border-white/8 bg-white/[0.02] hover:border-white/15"
+                    }`}
+                  >
+                    <div
+                      className={`text-label font-medium ${active ? "text-iris-100" : "text-ink-200"}`}
+                    >
+                      {t.label}
+                    </div>
+                    <div className="mt-0.5 text-xs text-ink-400">{t.tagline}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="space-y-3.5 rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02] p-4">
+              <p className="text-label leading-relaxed text-ink-300">{info.whatItDoes}</p>
+              <div>
+                <p className="text-micro font-medium uppercase text-ink-500">You get back</p>
+                <ul className="mt-2 space-y-1.5">
+                  {info.youGetBack.map((line) => (
+                    <li key={line} className="flex gap-2.5 text-xs leading-relaxed text-ink-300">
+                      <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-iris-400/70" />
+                      {line}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {info.requires && (
+                <InfoNote tone="amber">
+                  {info.requires}{" "}
+                  <button
+                    onClick={() => onGo("Documents")}
+                    className="font-medium underline underline-offset-2 hover:text-amber-100"
+                  >
+                    Go to Documents
+                  </button>
+                </InfoNote>
+              )}
+            </div>
+          </Card>
+
+          <Card className="space-y-5">
+            <div className="flex items-baseline gap-2.5">
+              <span className="text-micro font-medium text-iris-300/70">02</span>
+              <div>
+                <h3 className="text-title font-semibold text-ink-50">{PANEL_COPY.sectionProvide}</h3>
+                <p className="mt-1 text-label leading-relaxed text-ink-400">{info.youProvide}</p>
+              </div>
+            </div>
 
           {isGenreTask ? (
             <Field
@@ -180,16 +192,34 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
                 placeholder={"INT. WAREHOUSE - NIGHT\n\nMAYA edges along the catwalk, torch shaking..."}
                 className={`${inputClass} h-44 resize-y font-mono text-xs leading-relaxed`}
               />
-              <div className="flex justify-between text-xs">
-                <span className={trimmed.length < MIN_SCRIPT_CHARS ? "text-slate-600" : "text-emerald-600"}>
-                  {trimmed.length} characters
-                </span>
-                <span className="text-slate-600">~{Math.max(1, Math.round(trimmed.length / 5))} words</span>
+              {/* The live count is the only feedback before submitting, so it
+                  earns a filling bar rather than only a number. */}
+              <div className="space-y-1.5">
+                <div className="h-0.5 overflow-hidden rounded-full bg-white/8">
+                  <div
+                    className="h-full rounded-full bg-iris-400 transition-[width,background-color] duration-[var(--duration-base)] ease-[var(--ease-out-quint)]"
+                    style={{
+                      width: `${Math.min(100, (trimmed.length / MIN_SCRIPT_CHARS) * 100)}%`,
+                      backgroundColor:
+                        trimmed.length >= MIN_SCRIPT_CHARS ? "var(--color-emerald-400)" : undefined,
+                    }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span
+                    className={trimmed.length < MIN_SCRIPT_CHARS ? "text-ink-500" : "text-emerald-400"}
+                  >
+                    {trimmed.length} characters
+                  </span>
+                  <span className="text-ink-500">
+                    ~{Math.max(1, Math.round(trimmed.length / 5))} words
+                  </span>
+                </div>
               </div>
             </Field>
           )}
 
-          <div className="space-y-4 border-t border-slate-800 pt-4">
+          <div className="space-y-4 border-t border-white/5 pt-5">
             <Field
               label="Session ID"
               help="Groups your runs so History can show them together."
@@ -202,21 +232,21 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
               />
             </Field>
 
-            <label className="flex cursor-pointer items-start gap-3">
+            <label className="press flex cursor-pointer items-start gap-3 rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02] p-3 hover:border-white/15">
               <input
                 type="checkbox"
                 checked={evaluate}
                 onChange={(e) => setEvaluate(e.target.checked)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
+                className="mt-0.5 h-4 w-4 shrink-0 accent-iris-500"
               />
-              <span className="text-sm text-slate-300">
+              <span className="text-label text-ink-200">
                 Score this answer for faithfulness
                 <Explain term="faithfulness">{GLOSSARY.evaluate}</Explain>
               </span>
             </label>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             <PrimaryButton
               onClick={run}
               disabled={loading || validation !== null}
@@ -226,9 +256,9 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
               {loading ? "Running…" : `Run ${info.label}`}
             </PrimaryButton>
             {validation ? (
-              <p className="text-center text-xs text-slate-500">{validation}</p>
+              <p className="text-center text-xs text-amber-300/80">{validation}</p>
             ) : (
-              <p className="text-center text-xs text-slate-600">
+              <p className="text-center text-xs text-ink-500">
                 Takes about {info.typicalWait.split("(")[0].trim()}. Nothing is saved outside this app.
               </p>
             )}
@@ -238,7 +268,7 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
         </Card>
       </div>
 
-      <Card className="lg:sticky lg:top-32 lg:self-start">
+      <Card className="lg:sticky lg:top-36 lg:self-start">
         {!result && !loading && (
           <EmptyState
             title="Your answer will appear here"
@@ -248,8 +278,8 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
         {loading && <BusyState what={`${info.label} is running…`} wait={info.typicalWait} />}
         {result && !loading && (
           <div className="animate-fade-in-up space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-1 text-xs text-slate-500">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-3.5">
+              <div className="flex items-center gap-1 font-mono text-xs text-ink-400">
                 Result #{result.result_id}
                 <Explain term="result ID">{GLOSSARY.resultId}</Explain>
               </div>
@@ -269,36 +299,29 @@ export default function AgentsPanel({ onGo }: { onGo: (tab: string) => void }) {
               </div>
             </div>
 
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{result.result}</p>
+            <p className="whitespace-pre-wrap text-body text-ink-200">{result.result}</p>
 
             {result.eval?.reasoning && (
-              <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                <p className="text-xs font-medium text-slate-400">Why it scored that</p>
-                <p className="mt-1 text-xs leading-relaxed text-slate-500">{result.eval.reasoning}</p>
+              <div className="rounded-[var(--radius-control)] border border-white/8 bg-white/[0.02] p-3.5">
+                <p className="text-micro font-medium uppercase text-ink-500">Why it scored that</p>
+                <p className="mt-1.5 text-xs leading-relaxed text-ink-400">{result.eval.reasoning}</p>
               </div>
             )}
 
-            <div className="flex items-center gap-4 border-t border-slate-800 pt-3">
-              <button
-                onClick={handleDownload}
-                disabled={downloading}
-                className="inline-flex items-center gap-2 text-xs text-slate-500 transition-colors hover:text-blue-400 disabled:opacity-40"
-              >
-                {downloading ? <Spinner /> : null}
+            <div className="flex flex-wrap items-center gap-2 border-t border-white/5 pt-4">
+              <SecondaryButton onClick={handleDownload} disabled={downloading} loading={downloading}>
                 Download as PDF
-              </button>
+              </SecondaryButton>
               {task === "release_listing" && (
-                <button
-                  onClick={() => onGo("Release Planner")}
-                  className="text-xs text-blue-400 transition-colors hover:text-blue-300"
-                >
-                  Plan a release date for this genre →
-                </button>
+                <SecondaryButton tone="accent" onClick={() => onGo("Release Planner")}>
+                  Plan a release date →
+                </SecondaryButton>
               )}
             </div>
           </div>
         )}
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 }
