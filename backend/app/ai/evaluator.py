@@ -1,8 +1,8 @@
-from llm import generate_text
+from app.core.llm import generate_text
 import json
 import re
 
-from schemas import EvalResult
+from app.schemas import EvalResult
 
 
 def _parse_json_response(text: str) -> dict:

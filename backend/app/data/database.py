@@ -8,7 +8,7 @@ import psycopg2.extras
 import psycopg2.pool
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
-from resilience import with_retry, logger
+from app.core.resilience import with_retry, logger
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt

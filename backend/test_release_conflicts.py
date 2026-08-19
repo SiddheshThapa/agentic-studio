@@ -9,13 +9,13 @@ It is also written so `pytest` collects it unchanged if pytest is added later.
 
 from datetime import date
 
-from agents import (
+from app.ai.agents import (
     COMPETITION_WINDOW_DAYS,
     check_release_conflicts,
     find_competing_releases,
     parse_listing,
 )
-from guardrails import retrieval_status
+from app.core.guardrails import retrieval_status
 
 # Exactly the shape get_genre_release_listing() produces.
 LISTING = """- The Bay (2026-07-02)

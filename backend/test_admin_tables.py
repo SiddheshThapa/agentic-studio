@@ -12,7 +12,7 @@ built, so they are the parts worth pinning down. Anything that reads
 information_schema or a real row needs a database and is not covered.
 """
 
-from database import (
+from app.data.database import (
     ADMIN_LIST_MAX_LIMIT,
     ADMIN_TABLES,
     AdminTableError,

@@ -1,12 +1,12 @@
+venv/
 .env
 # Credential JSON (GCP service-account keys download under their project id).
 # No tracked .json lives at the repo root — all of them are under frontend/.
 /*.json
-venv/
+gcp-credentials.json
+service-account-credentials.json
 __pycache__/
 *.pyc
 .claude/
 openspec/
-requirements.txt.bak
-*.log
-.pytest_cache/
+.idea/

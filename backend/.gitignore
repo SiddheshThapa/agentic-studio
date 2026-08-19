@@ -1,0 +1,21 @@
+.env
+gcp-credentials.json
+service-account-credentials.json
+venv/
+__pycache__/
+*.pyc
+.claude/
+openspec/
+requirements.txt.bak
+*.log
+.pytest_cache/
+# Credentials & Secrets
+client_secret_*.json
+
+# SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary Scripts
+refactor.py

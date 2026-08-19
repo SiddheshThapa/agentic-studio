@@ -5,7 +5,7 @@ import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-from config import GOOGLE_SERVICE_ACCOUNT_JSON
+from app.core.config import GOOGLE_SERVICE_ACCOUNT_JSON
 
 CALENDAR_ID = os.getenv("SHARED_CALENDAR_ID")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]

@@ -1,5 +1,5 @@
-from llm import embed_text, generate_text
-from database import document_exists, insert_document
+from app.core.llm import embed_text, generate_text
+from app.data.database import document_exists, insert_document
 
 
 

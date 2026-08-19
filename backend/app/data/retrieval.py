@@ -1,7 +1,7 @@
 import json
-from llm import embed_text, generate_text
-from database import search_similar, bm25_search
-from resilience import logger
+from app.core.llm import embed_text, generate_text
+from app.data.database import search_similar, bm25_search
+from app.core.resilience import logger
 import numpy as np
 
 

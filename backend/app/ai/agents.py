@@ -1,12 +1,18 @@
 import re
 from datetime import date, datetime
 import httpx
-from llm import generate_text
-from guardrails import retrieval_status
-from retrieval import hybrid_search
-from resilience import safe_generate, logger
-from config import TMDB_API_KEY
-from database import get_result_with_script
+from app.core.llm import generate_text
+from app.core.guardrails import check_retrieval_confidence, retrieval_status
+from app.data.retrieval import hybrid_search
+from app.core.resilience import safe_generate, logger
+from app.core.config import TMDB_API_KEY, AGENT4_BASE_URL
+from app.ai.evaluator import _parse_json_response
+import json
+from uuid import uuid4
+from a2a.client import A2ACardResolver, A2AClient, create_text_message_object
+from a2a.types import MessageSendParams, SendMessageRequest
+from a2a.utils import get_message_text
+from app.data.database import get_result_with_script
 
 TMDB_DISCOVER_URL = "https://api.themoviedb.org/3/discover/movie"
 
@@ -242,3 +248,75 @@ def check_release_conflicts(genre: str, proposed_date: str, listing_text: str) -
         )
 
     return "\n".join(lines)
+
+
+async def check_conflicts_via_a2a(date_str: str) -> dict:
+    async with httpx.AsyncClient() as httpx_client:
+        agent_card = await A2ACardResolver(httpx_client, AGENT4_BASE_URL).get_agent_card()
+        client = A2AClient(httpx_client, agent_card=agent_card)
+
+        request = SendMessageRequest(
+            id=str(uuid4()),
+            params=MessageSendParams(message=create_text_message_object(content=date_str)),
+        )
+        response = await client.send_message(request)
+        report_text = get_message_text(response.root.result)
+        return json.loads(report_text)
+
+
+def check_compliance_structured(script_text: str) -> dict:
+    flagged_topics = safe_generate(generate_text, "Identify topics that need compliance review.", script_text)
+    guideline_matches = hybrid_search(flagged_topics, collection="guidelines", top_k=3)
+    
+    if not check_retrieval_confidence(guideline_matches):
+        return {"hard_violations": [], "soft_violations": [], "message": "No guidelines found."}
+        
+    context = "\n".join(f"- {m['text']}" for m in guideline_matches)
+    prompt = f"Script flagged: {flagged_topics}\nGuidelines: {context}\nIdentify any strict/hard violations and soft/borderline violations based on these guidelines. Return strict JSON with 'hard_violations' (list of strings) and 'soft_violations' (list of strings)."
+    
+    result = generate_text("You are a compliance checker. Output strict JSON with lists 'hard_violations' and 'soft_violations'.", prompt, response_json=True)
+    try:
+        return _parse_json_response(result)
+    except Exception:
+        return {"hard_violations": [], "soft_violations": [], "message": "Failed to parse compliance"}
+
+
+def generate_script_digest(script_text: str) -> dict:
+    prompt = f"Condense the following script into a digest containing 'genre', 'tone', 'rating_relevant_content' (list), and 'marketable_hooks' (list). Script: {script_text}"
+    result = generate_text("You are a script summarizer. Output strict JSON with 'genre', 'tone', 'rating_relevant_content', and 'marketable_hooks'.", prompt, response_json=True)
+    try:
+        return _parse_json_response(result)
+    except Exception:
+        return {
+            "error": "Failed to parse digest",
+            "raw": result,
+            "genre": "unknown",
+            "tone": "unknown",
+            "rating_relevant_content": [],
+            "marketable_hooks": [],
+        }
+
+
+def producer_agent(script_digest: dict, executive_rejections: list[str] = None) -> dict:
+    prompt = f"Script digest: {json.dumps(script_digest)}\n"
+    if executive_rejections:
+        prompt += f"Previous executive rejections to address: {json.dumps(executive_rejections)}\n"
+    
+    prompt += "Pitch this script focusing on marketability and mitigating any previous concerns. Output strict JSON with 'pitch_fields' (dict containing EXACT keys: 'title_concept', 'strengths' (list), 'target_demographic', 'budget_tier', 'mitigation_plan', 'proposed_release_date' (YYYY-MM-DD)) and 'strategy' (string)."
+    
+    result = generate_text("You are a passionate film producer. Output strict JSON.", prompt, response_json=True)
+    try:
+        return _parse_json_response(result)
+    except Exception:
+        return {"pitch_fields": {}, "strategy": "Error generating pitch"}
+
+
+def executive_agent(script_digest: dict, producer_pitch: dict, compliance_data: dict, date_conflict_data: dict) -> dict:
+    prompt = f"Script digest: {json.dumps(script_digest)}\nProducer Pitch: {json.dumps(producer_pitch)}\nCompliance Data: {json.dumps(compliance_data)}\nDate Conflicts: {json.dumps(date_conflict_data)}\n"
+    prompt += "Evaluate the pitch against the data. Output strict JSON with 'concern_list' (list of strings), 'is_approved' (boolean), and 'message' (string explaining the decision)."
+    
+    result = generate_text("You are a pragmatic studio executive. Output strict JSON.", prompt, response_json=True)
+    try:
+        return _parse_json_response(result)
+    except Exception:
+        return {"concern_list": ["Error generating review"], "is_approved": False, "message": "Parse error"}

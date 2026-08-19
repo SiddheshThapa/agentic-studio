@@ -8,7 +8,7 @@ import { logApiEnd, logApiStart } from "@/lib/apilog";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "";
 
-export type TaskType = "compliance" | "analyze" | "release_listing" | "release_check";
+export type TaskType = "compliance" | "analyze" | "release_listing" | "release_check" | "greenlight";
 
 export interface EvalResult {
   score: number | null;

@@ -6,11 +6,8 @@ import secrets
 from datetime import datetime, timedelta
 from uuid import uuid4
 import httpx
-from a2a.client import A2ACardResolver, A2AClient, create_text_message_object
-from a2a.types import MessageSendParams, SendMessageRequest
-from a2a.utils import get_message_text
-from config import MAX_UPLOAD_FILE_SIZE_MB, AGENT4_BASE_URL, CALENDAR_MODE, API_SECRET_KEY, SUPPORTED_COUNTRIES
-from database import (
+from app.core.config import MAX_UPLOAD_FILE_SIZE_MB, AGENT4_BASE_URL, CALENDAR_MODE, API_SECRET_KEY, SUPPORTED_COUNTRIES
+from app.data.database import (
     init_tables, get_result, connection, record_run,
     get_result_with_script, delete_documents_by_filename, cache_get,
     memory_get, save_eval_record, get_eval_summary, generate_eval_chart,
@@ -19,33 +16,42 @@ from database import (
     admin_list_rows, admin_structural_warnings, admin_table_summary,
     admin_update_row,
 )
-from ingest import ingest_document
-from supervisor import run_supervisor
-from agents import resolve_genre_from_listing
-from guardrails import check_query_safety
-from evaluator import score_faithfulness
-from resilience import check_rate_limit, logger
-from schemas import TaskType, AgentResponse
+from app.data.ingest import ingest_document
+from app.ai.supervisor import run_supervisor
+from app.ai.agents import resolve_genre_from_listing, check_conflicts_via_a2a
+from app.core.guardrails import check_query_safety
+from app.ai.evaluator import score_faithfulness
+from app.core.resilience import check_rate_limit, logger
+from app.schemas import TaskType, AgentResponse
 from fastapi.responses import Response
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
-from calendar_mcp import create_calendar_event_via_mcp
-from calendar_service_account import create_event_via_service_account
+from app.integrations.calendar_mcp import create_calendar_event_via_mcp
+from app.integrations.calendar_service_account import create_event_via_service_account
 from fastapi.middleware.cors import CORSMiddleware
 
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://agentic-studio-eight.vercel.app",
-    ],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 init_tables()
+
+import traceback
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Unhandled exception: {exc}\n{traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}"}
+    )
+
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)):
@@ -64,19 +70,6 @@ COUNTRY_DISPLAY_NAMES = {
     "DE": "Germany",
 }
 
-
-async def _check_conflicts_via_a2a(date_str: str) -> dict:
-    async with httpx.AsyncClient() as httpx_client:
-        agent_card = await A2ACardResolver(httpx_client, AGENT4_BASE_URL).get_agent_card()
-        client = A2AClient(httpx_client, agent_card=agent_card)
-
-        request = SendMessageRequest(
-            id=str(uuid4()),
-            params=MessageSendParams(message=create_text_message_object(content=date_str)),
-        )
-        response = await client.send_message(request)
-        report_text = get_message_text(response.root.result)
-        return json.loads(report_text)
 
 
 def _nearest_clear_date(proposed_date, conflict_date):
@@ -110,7 +103,7 @@ async def _create_calendar_event(summary: str, description: str, event_date: str
 
 
 async def _compute_recommended_dates(proposed_date_str: str) -> tuple[dict, dict]:
-    conflict_report = await _check_conflicts_via_a2a(proposed_date_str)
+    conflict_report = await check_conflicts_via_a2a(proposed_date_str)
     proposed_date = datetime.strptime(proposed_date_str, "%Y-%m-%d").date()
 
     recommended_dates = {}
@@ -192,7 +185,8 @@ async def run_agent_endpoint(
     logger.info(f"run-agent called: task={task.value}, session={session_id}")
 
     min_length = 1 if task == TaskType.release_listing else 10
-    if not check_query_safety(script_text, min_length=min_length):
+    check_toxicity = task not in (TaskType.greenlight, TaskType.analyze)
+    if not check_query_safety(script_text, min_length=min_length, check_toxicity=check_toxicity):
         raise HTTPException(status_code=400, detail="Script text is too short or invalid.")
 
     cache_key = f"{task.value}:{script_text}"
