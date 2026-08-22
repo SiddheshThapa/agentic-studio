@@ -10,18 +10,31 @@ domain-driven package (`backend/app/`: `ai/`, `core/`, `data/`,
 `integrations/`) rather than a flat set of top-level modules; a separate
 `backend/microservices/` package holds the standalone A2A agent. Postgres +
 pgvector (Supabase) is the single persistent store for all data: documents,
-cache, memory, results, and evaluation history. Row Level Security is
-enabled on every table. Sensitive endpoints require a shared-secret API key.
+cache, memory, results, evaluation history, and (as of the client/developer
+split) user accounts. Row Level Security is enabled on every table.
+Sensitive endpoints require a shared-secret API key; a second, independent
+layer — a login session cookie carrying a `developer`/`client` role — gates
+the admin-only surface (`/admin/tables/*`, `/auth/users*`) on top of that.
 Calendar events can be created through either of two independent backends,
-with automatic fallback between them. A Next.js single-page frontend
-(`frontend/`) consumes the FastAPI backend directly over CORS-enabled HTTP
-and covers every endpoint: running agents (including the Greenlight
-Committee's "Boardroom Chat" view), uploading/deleting reference documents,
-browsing history/results, the two-path release-date confirmation flow, and
-the evaluation dashboard. The system is designed to be deployed as three
-independent services — two on Render (the FastAPI backend and Agent 4) and
-one on Vercel (the frontend) — connected entirely through environment
-variables and CORS configuration, not shared infrastructure.
+with automatic fallback between them.
+
+**Two** Next.js apps consume this backend — `frontend/apps/client` (the
+working pipelines: running agents including the Greenlight Committee's
+"Boardroom Chat" view, uploading/deleting reference documents, browsing
+history/results, the release-date confirmation flow, the evaluation
+dashboard) and `frontend/apps/admin` (everything client has, plus the raw
+database browser, a technical request/response log, and user-account
+management) — sharing one buildless source folder (`frontend/packages/
+core`) rather than duplicating code between them. Neither talks to the
+FastAPI backend directly from the browser: each proxies every call through
+its own Next.js server route, which is also where the shared API key and
+the browser's session cookie actually meet the backend. The system is
+designed to be deployed as **four** independent services — two on Render
+(the FastAPI backend and Agent 4) and two on Vercel (one frontend
+deployment per app) — connected entirely through environment variables,
+not shared infrastructure. CORS between the frontends and the backend is
+no longer load-bearing for this topology (see Deployment) since the
+browser only ever talks to its own origin.
 
 **Import/run note:** because every backend module imports via the `app.`
 package prefix (e.g. `from app.core.config import ...`), the backend must be
@@ -54,6 +67,10 @@ SUPPORTED_COUNTRIES (list of country codes, parsed from a comma-separated
 Agent 4 checks and which countries get a calendar event; both
 agent4_service.py and main.py read this same list, so adding or removing a
 country is a one-line env change, not a code edit in either file).
+JWT_SECRET_KEY (signs the login session cookie, see app/core/auth.py below;
+falls back to API_SECRET_KEY so there isn't a second required secret to
+provision — set it explicitly only if the two should ever need to rotate
+independently).
 
 ### schemas.py
 TaskType (Enum: compliance, analyze, release_listing, release_check,
@@ -61,9 +78,22 @@ TaskType (Enum: compliance, analyze, release_listing, release_check,
 from_cache, eval). EvalResult (Pydantic model: score, reasoning).
 
 ### app/data/database.py [synchronous, psycopg2]
-get_connection — retry-wrapped via `app/core/resilience.py`'s with_retry
-decorator. init_tables — creates all 5 tables (documents, cache, memory,
-results, eval_history) and enables Row Level Security on all 5. **Called at
+Connections are pooled, not opened per query: `get_pool()` lazily builds a
+module-level `psycopg2.pool.ThreadedConnectionPool` (`DB_POOL_MIN`-`DB_POOL_MAX`,
+default 1-10) on first use — building it at import time would make importing
+this module fail whenever the database is unreachable, taking the whole API
+down instead of just the endpoints that need data. `_create_pool` is
+retry-wrapped via `app/core/resilience.py`'s `with_retry`. The `connection()`
+context manager borrows a pooled connection and always returns it (discarding
+and retrying once if the server closed it while idle); code must never call
+`.close()` on what it yields, since that destroys the connection instead of
+returning it to the pool. There is no `get_connection()` anymore. Four
+helpers built on `connection()` — `_fetch_all`, `_fetch_one`, `_execute`,
+`_execute_returning` — are what nearly every function below actually calls,
+replacing what used to be repeated open-cursor/execute/fetch/commit/close
+boilerplate in each one.
+init_tables — creates all 6 tables (documents, cache, memory,
+results, eval_history, users) and enables Row Level Security on all 6. **Called at
 import time in main.py** (module-level `init_tables()`, not inside a
 startup event), so simply importing `app.main` — or starting uvicorn against
 it — attempts a live DB connection immediately; an unreachable DATABASE_URL
@@ -73,6 +103,16 @@ delete_documents_by_filename, cache_get (24h TTL via SQL INTERVAL),
 cache_set, memory_add, memory_get, save_result, get_result,
 get_result_with_script, save_eval_record, get_eval_summary,
 generate_eval_chart (uses matplotlib, imported at top of file).
+create_user, get_user_by_email, get_user_by_id, list_users, count_developers,
+update_user_role, delete_user — the only functions that touch the `users`
+table (see app/core/auth.py below). `get_user_by_id` returns `(id, email,
+role)` and exists specifically so `require_role` can re-check a session's
+role against the live DB row rather than trusting the JWT claim.
+`count_developers` backs `main.py::_refuse_if_last_developer`, which blocks
+demoting/deleting the last developer account. Deliberately not exposed
+through `ADMIN_TABLES`/the generic admin browser: that browser casts every
+column to text for `?q=` search and returns whole rows, which is fine for
+`cache`/`results` but wrong for a table holding `password_hash`/`salt`.
 
 ### app/core/llm.py [synchronous]
 embed_text — embeds via config.py's EMBEDDING_MODEL (default
@@ -90,9 +130,12 @@ executive_agent).
 
 ### app/core/resilience.py
 with_retry — decorator for automatic retry with exponential backoff, used
-on database.py's get_connection.
-check_rate_limit — in-memory per-session request tracker, used on
-/run-agent, /check-conflicts, and /finalize-calendar.
+on database.py's `_create_pool` (the connection pool builder, not a
+per-query connection anymore — see app/data/database.py above).
+check_rate_limit — in-memory per-key request tracker, used on
+/run-agent, /check-conflicts, /finalize-calendar (per session), and
+/auth/login (per source IP and, independently, per email — see
+"Login sessions" below).
 logger — shared Python logging instance, used across main.py, including to
 log calendar-backend fallback warnings.
 safe_generate — wraps an LLM call, returns a fallback message on failure
@@ -127,6 +170,38 @@ better-profanity's word list, e.g. mild insults like "useless" or "idiot"
 (false negative); see Known Limitations.
 check_retrieval_confidence — rejects retrieval results below a
 rerank_score threshold, preventing weak matches from being used.
+
+### app/core/auth.py
+Login sessions: password hashing, the session JWT, and the role gate. Added
+alongside the client/developer frontend split (see the frontend section
+below) — this is what makes `/admin/tables/*` and `/auth/users*` visible only
+to a `developer`-role session, distinct from the `X-API-Key` shared secret
+that gates every mutating endpoint regardless of who's logged in.
+hash_password(password, salt=None) → (hash, salt) — PBKDF2-HMAC-SHA256,
+390,000 iterations (OWASP's 2024 minimum), a fresh random salt
+(`secrets.token_hex(16)`) per call unless one is supplied for verification.
+verify_password(password, hash, salt) — recomputes and compares via
+`secrets.compare_digest` (timing-safe, same pattern as `require_api_key`).
+create_session_token(user_id, email, role) — signs a JWT (PyJWT) with
+`{sub, email, role, exp}`, 12-hour expiry, using `config.JWT_SECRET_KEY`
+(falls back to `API_SECRET_KEY` if unset, so there isn't a second required
+secret to provision unless the two should rotate independently).
+decode_session_token(token) — verifies and decodes; returns `None` rather
+than raising on any `PyJWTError` (expired, tampered, wrong signature), so
+callers can treat "no session" and "bad session" identically.
+get_current_user(session=Cookie(...)) — FastAPI dependency reading the
+`session` cookie; `None` if absent or invalid, never raises. Used directly by
+`GET /auth/me` (which turns `None` into a 401 itself) and indirectly by
+require_role below.
+require_role(*roles) — returns a FastAPI dependency: 401 if not logged in,
+401 if the session's user id no longer resolves to a row in `users`
+(deleted account), 403 if the *current* DB role isn't in `roles`, otherwise
+returns the JWT's decoded fields merged with that freshly-read role. It
+calls `get_user_by_id` on every invocation instead of trusting the JWT's
+`role` claim, so a demotion or deletion takes effect immediately rather than
+waiting out the 12h session — the JWT claim is only a snapshot from login
+time. Used exactly like `Depends(require_api_key)`, and stacked *with* it
+(not instead of it) on `/admin/tables/*` — see main.py below.
 
 ### app/data/retrieval.py
 gemini_rerank — one batched Gemini call that scores every shortlisted
@@ -395,9 +470,38 @@ rejects with 403 if API_SECRET_KEY is unset/empty, if the header is
 missing, or if it doesn't match (compared via secrets.compare_digest to
 avoid timing attacks). Applied to POST /run-agent, POST /confirm-date,
 POST /override-date, POST /check-conflicts, POST /finalize-calendar, POST
-/ingest, and DELETE /document. GET endpoints (/health, /result/{id},
+/ingest, and DELETE /document — and, stacked with require_role("developer"),
+all six /admin/tables/* routes. GET endpoints (/health, /result/{id},
 /result/{id}/download, /eval/summary, /eval/chart, /history/{session_id})
 require no key.
+
+**Login endpoints** (app/core/auth.py does the actual work; see above):
+POST /auth/login — rate-limited before anything else runs: 429 past 20
+requests/60s for the caller's source IP, and independently 429 past 5
+requests/60s for the submitted email (both via `resilience.check_rate_limit`,
+so both are in-process and reset on restart). Then verifies email+password
+against the users table (get_user_by_email + verify_password), issues a
+session JWT (create_session_token) as an httpOnly, SameSite=Lax cookie, 12h
+expiry. Returns {email, role}. No API key or existing session required —
+this is how a session is created in the first place.
+POST /auth/logout — clears the session cookie. Returns {ok: true}.
+GET /auth/me — returns {email, role} from the current session cookie, or
+401 if there isn't one. This is what both frontends poll once on load to
+decide between rendering LoginForm and the app shell.
+GET /auth/users, POST /auth/users, PATCH /auth/users/{id}, DELETE
+/auth/users/{id} — developer-only (require_role("developer")), no API key
+needed on top since these aren't part of the API-key-gated surface. List
+returns {id, email, role, created_at} per user, password hashes never
+included in any response. POST validates role ∈ {developer, client} and
+returns 400 on a duplicate email (unique constraint on `users.email`).
+PATCH validates the same role enum. Both PATCH (when demoting away from
+`developer`) and DELETE first call `_refuse_if_last_developer`, which uses
+`count_developers()` to return 400 rather than let the only remaining
+developer account be demoted or deleted — without that guard the app locks
+every `/admin/*` and `/auth/users` route with no way back short of direct DB
+access and re-running `seed_admin.py`. There is no self-service password
+change or reset endpoint — an account's password can currently only be set
+at creation time.
 
 COUNTRY_DISPLAY_NAMES — a display-name-only lookup (US, MX, GB, JP, DE by
 default) used solely to label calendar events; it is not the authoritative
@@ -484,27 +588,57 @@ Executive/Mediator debate) — there is no separate confirm/approve endpoint
 for a greenlight verdict, the RED/YELLOW/GREEN result is final once
 /run-agent returns.
 
-### frontend/ [Next.js 16 App Router, React 19, Tailwind 4]
-A single-page dashboard that is the only client of main.py's API — it calls
-the backend directly from the browser (via CORS) rather than through a
-Next.js API route/proxy.
+### frontend/ [Next.js 16 App Router, React 19, Tailwind 4 — two apps]
+As of the client/developer split, `frontend/` holds **two** independent
+Next.js apps (`apps/client`, `apps/admin`) plus a shared, buildless source
+folder (`packages/core`) neither of them installs as a package — each app's
+`tsconfig.json` path-maps `@/lib/*` and `@/components/*` straight into it.
+Full mechanical detail (why it isn't an npm workspace, why Turbopack's
+`root` has to point two directories up, why `packages/core` carries its own
+tiny `package.json`) lives in `frontend/packages/core/README.md`; this
+section covers what each app is *for*.
 
-frontend/lib/api.ts — every backend call lives in this one file: typed
+**Neither app calls main.py's API directly from the browser anymore.** Both
+proxy every call through their own same-origin `app/api/proxy/[...path]/
+route.ts` (a two-line re-export of `packages/core/lib/proxy.ts`), which runs
+on the Next.js server, attaches `X-API-Key` from a server-only
+`BACKEND_API_KEY` env var, and streams the backend's response — including
+`Set-Cookie` — straight back. This is what keeps the API key out of the
+browser (previously `NEXT_PUBLIC_API_KEY`, inlined into the client JS
+bundle — see the old Known Limitation #15, now resolved) and what lets the
+session cookie set by `/auth/login` stay same-origin for the browser even
+though the FastAPI backend runs on a different port entirely. From CORS's
+perspective, the browser never leaves its own origin; the proxy's call to
+the backend is server-to-server and isn't subject to browser CORS at all.
+
+packages/core/lib/api.ts — every backend call lives in this one file: typed
 wrappers (checkHealth, runAgent, confirmDate, overrideDate, checkConflicts,
 finalizeCalendar, ingestDocument, deleteDocument, getResult,
-downloadResult, getHistory, getEvalSummary, getEvalChart) plus the
+downloadResult, getHistory, getEvalSummary, getEvalChart, plus login,
+logout, getCurrentUser, listAdminUsers, createAdminUser,
+updateAdminUserRole, deleteAdminUser for the auth/users surface) plus the
 request-mirroring TypeScript types (`TaskType` includes `"greenlight"`,
 AgentResponse, ConflictReport, DateConfirmationResponse,
-ConflictCheckResponse, etc.). A single `request<T>` helper attaches
-`X-API-Key` (from NEXT_PUBLIC_API_KEY) when a call is marked `authed`,
-reads NEXT_PUBLIC_API_URL as the backend base URL, and normalizes both
-network failures and non-OK responses into a thrown `ApiError` carrying the
-HTTP status and a message extracted from the response body's
-`detail`/`error` field.
+ConflictCheckResponse, SessionUser, AdminUser, etc.). A single `request<T>`
+helper calls the same-origin proxy (`API_URL = "/api/proxy"`) and normalizes
+both network failures and non-OK responses into a thrown `ApiError`
+carrying the HTTP status and a message extracted from the response body's
+`detail`/`error` field. The `authed` flag `liveRequest` still accepts on
+every call site is now vestigial — the proxy attaches `X-API-Key`
+unconditionally — kept rather than touching the ~15 call sites that pass it.
 
-frontend/app/page.tsx — the entire UI: a tab bar (Agents, Documents,
-History & Results, Insights) plus a health-check pill in the header that
-polls GET /health every 30s.
+packages/core/lib/session.ts — `useSession(demo)`: checks `GET /auth/me`
+once on mount (async IIFE + cancelled guard, not a bare effect setState),
+returns `{checked, user, refresh}`. Under Demo Mode it never calls the
+network at all, returning a synthetic `{email: "demo@studio.example", role:
+"developer"}` instead — consistent with Demo Mode's existing rule that
+nothing reaches the network, applied to login rather than adding fixtures
+for a system that isn't the point of a demo.
+
+**apps/client/app/page.tsx** — Start here, Documents, Agents, Release
+Planner, History, Insights. Gated on `useSession`: not logged in renders
+`LoginForm` (shared, `packages/core/components/LoginForm.tsx`); logged in
+renders the tab shell exactly as before, plus a Sign out button.
 - AgentsPanel — task picker (compliance / analyze / release_listing /
   release_check / **greenlight**) with the matching input for each task,
   runs POST /run-agent, and:
@@ -534,12 +668,26 @@ polls GET /health every 30s.
 - InsightsPanel — GET /eval/summary and GET /eval/chart (rendered as a
   base64 PNG `<img>`), with a manual refresh button.
 
-Environment: frontend/.env.local (local) or Vercel's project environment
-variables (deployed) set NEXT_PUBLIC_API_URL (the FastAPI base URL —
-`http://localhost:8000` locally) and NEXT_PUBLIC_API_KEY (must match
-main.py's API_SECRET_KEY). Both are Next.js "public" env vars, so they are
-inlined into the client-side JS bundle at build time — see Known
-Limitations.
+**apps/admin/app/page.tsx** — everything apps/client has, plus:
+- DatabasePanel/DatabaseEditor — the admin table browser UI (see Admin
+  table browser above), gated server-side by `require_role("developer")`
+  even if someone points a client-role session's cookie at these routes
+  directly.
+- ApiLogPanel — the technical request/response drawer (see Client-side
+  features in PROJECT_GUIDE.md).
+- UsersPanel — create accounts, change role, remove access, calling the
+  `/auth/users*` routes. No signup flow anywhere in either app; the first
+  account comes from `backend/seed_admin.py`.
+Gated the same way as apps/client, plus a second check: a successfully
+logged-in session with `role !== "developer"` sees a plain "this account
+doesn't have developer access" screen with sign-out, rather than the app
+shell — the backend would refuse the admin routes anyway, but the UI says
+so immediately instead of surfacing 403s per-request.
+
+Environment: each app has its own `.env.local`. `BACKEND_API_URL` (default
+`http://localhost:8000`) and `BACKEND_API_KEY` (must match main.py's
+API_SECRET_KEY) are read only by the proxy route, server-side — no
+`NEXT_PUBLIC_` prefix, so neither is ever inlined into the browser bundle.
 
 ---
 
@@ -623,8 +771,9 @@ main.py receives a request
 ---
 
 ## Deployment
-Three independent services, connected purely through environment
-variables and CORS — no shared filesystem or process between them. (The
+Four independent services (two on Render, two on Vercel — see System
+Overview above), connected purely through environment variables — no
+shared filesystem or process between them. (The
 CORS configuration currently in main.py is wide open — `allow_origins=["*"]`
 — see Known Limitations before relying on this section's original
 allowlist-based design for a public deployment.)
@@ -665,14 +814,24 @@ conflict report (see supervisor.py above), so a misconfigured
 AGENT4_BASE_URL won't crash a greenlight run, it will just make every
 verdict blind to date conflicts (never YELLOW, only GREEN or RED).
 
-**Vercel — frontend**
-Root Directory must be set to `frontend`. Environment variables:
-NEXT_PUBLIC_API_URL set to the backend Render service's URL,
-NEXT_PUBLIC_API_KEY matching API_SECRET_KEY.
+**Vercel — two frontend deployments, not one**
+Since the client/developer split, `frontend/` is two independent Next.js
+apps and needs two separate Vercel projects (or two deploy targets on
+whatever host): Root Directory `frontend/apps/client` for one, `frontend/
+apps/admin` for the other. Each needs its own environment variables:
+`BACKEND_API_URL` set to the backend Render service's URL, `BACKEND_API_KEY`
+matching `API_SECRET_KEY` — **not** prefixed `NEXT_PUBLIC_`, since these are
+read only by each app's own `app/api/proxy/[...path]/route.ts` on the
+server, never by browser code. A `frontend/.vercel` project link created
+before the split points at the old single-app layout and needs to be
+recreated (or repointed) as two projects.
 
-**CORS is the one place all three services must agree** — see the
-Known Limitations note on the current wildcard CORS config before
-deploying.
+**CORS no longer needs an entry per frontend deployment.** Because both
+apps proxy through their own Next.js server rather than calling main.py
+directly from the browser, the backend only ever sees server-to-server
+requests from them — not subject to CORS. The wildcard CORS config
+(`allow_origins=["*"]`) below is about any *other*, direct browser client;
+see the Known Limitations note before deploying if one is ever added.
 
 ---
 
@@ -680,11 +839,16 @@ deploying.
 1. Database access is synchronous (psycopg2) inside async FastAPI
    endpoints, which serializes database calls under concurrent load.
    Scaling this would require migrating database.py to asyncpg.
-2. score_context_precision is implemented but not wired into any endpoint;
-   doing so requires agents.py to also return retrieved chunks alongside
-   its text answer.
-3. MAX_SCRIPT_TEXT_LENGTH is defined in config.py but not currently
-   enforced against incoming script_text.
+2. **Resolved.** `score_context_precision` was never wired into any
+   endpoint. It has since been deleted along with the
+   `eval_history.context_precision_score` column and the frontend tile
+   that always showed `—` for it (see PROJECT_GUIDE.md's Dead code
+   section).
+3. **Resolved.** `MAX_SCRIPT_TEXT_LENGTH` was defined in config.py but
+   never enforced against incoming `script_text`. It, along with
+   `CACHE_TTL_HOURS`, `RATE_LIMIT_MAX_REQUESTS`, and
+   `RATE_LIMIT_WINDOW_SECONDS` (same problem — declared, never imported),
+   has since been deleted from config.py.
 4. Agent 3's release-listing step reads TMDb's first results page only (no
    pagination beyond ~20 films) and does not include per-film studio data.
 5. **CORS currently allows every origin** (`allow_origins=["*"]`, all
@@ -729,12 +893,14 @@ deploying.
 14. A country added to SUPPORTED_COUNTRIES beyond the default 5 will have
     its calendar events labeled with its raw country code unless a
     friendlier name is also added to main.py's COUNTRY_DISPLAY_NAMES.
-15. NEXT_PUBLIC_API_KEY is a Next.js "public" env var, so it is inlined
-    into the client-side JS bundle and visible to anyone who opens the
-    deployed frontend's dev tools — a genuine credential-exposure risk on
-    a public deployment. Combined with #5's wildcard CORS, a publicly
-    deployed instance currently has weaker request-origin protection than
-    the API-key check alone might suggest.
+15. **Resolved.** NEXT_PUBLIC_API_KEY used to be a Next.js "public" env
+    var inlined into the client-side JS bundle. Both frontend apps now
+    proxy every backend call through their own server-side route
+    (`app/api/proxy/[...path]/route.ts`), which attaches the key from a
+    server-only `BACKEND_API_KEY` instead — the browser never receives it.
+    Combined with #5's wildcard CORS, though: an unauthenticated read
+    endpoint is still reachable from any origin, since CORS and the API
+    key are independent protections and only the latter changed here.
 16. The two Render services and the Supabase database each have
     independent free-tier behavior (e.g. cold starts after inactivity),
     not something the application code accounts for or surfaces to the
@@ -756,6 +922,32 @@ deploying.
     confuse with a `gcp-credentials.json` placed at the repo root — MCP
     calendar mode will fail to find credentials if the file is only
     present at the root.
+20. `POST /auth/login` rate-limits per source IP (20/60s) and per submitted
+    email (5/60s) via the same in-process `check_rate_limit` tracker used
+    on `/run-agent` — so, like that one, the counters reset on restart and
+    aren't shared across worker processes. Acceptable for a small internal
+    deployment; a multi-worker or multi-instance production deployment
+    would need a shared store (Redis or similar) for this to hold across
+    all of them.
+21. There is no password reset or self-service password change. Changing
+    a password currently means a developer deleting the account and
+    recreating it (which issues a new one), since `PATCH /auth/users/{id}`
+    only accepts a `role` change.
+22. The session JWT is stateless and has no general server-side revocation
+    list, but it is not entirely unchecked either: `require_role` (used by
+    every `/admin/tables/*` and `/auth/users*` route) re-reads the user's
+    row via `get_user_by_id` on each call, so deleting or demoting an
+    account through `DELETE`/`PATCH /auth/users/{id}` takes effect on those
+    routes immediately, not after a 12h wait. The gap is narrower than it
+    used to be: `GET /auth/me` and anything else that depends only on
+    `get_current_user` (decode-only, no DB lookup) still treats a deleted
+    account's still-valid JWT as logged in until it expires naturally.
+23. `frontend/packages/core/lib/proxy.ts` forwards every request header
+    (minus `host`/`content-length`) to the backend, including whatever a
+    client sends — this is fine today since Next.js's own server is the
+    only caller, but it means the proxy trusts the backend to validate
+    everything the browser could have put in a header, rather than
+    stripping to an allowlist.
 
 ---
 
@@ -790,16 +982,25 @@ deploying.
    Confirm `requirements.txt` is plain UTF-8 before installing — a file
    regenerated via PowerShell's `pip freeze > requirements.txt` on Windows
    is written as UTF-16 by default, which `pip install -r` cannot parse.
-7. To run the frontend: `npm install` inside frontend/, then a
-   frontend/.env.local with NEXT_PUBLIC_API_URL (`http://localhost:8000`)
-   and NEXT_PUBLIC_API_KEY (matching API_SECRET_KEY), then `npm run dev`
-   — serves on `http://localhost:3000`. If the dev server or type-checker
-   behaves oddly after a crash/interrupted run, delete `frontend/.next`
-   (pure build cache, safe to delete, regenerates automatically) before
-   investigating further — this is especially worth doing if the project
-   directory is synced by OneDrive/Dropbox/etc., since background syncing
-   can corrupt files that are being actively written mid-build.
-8. Run `pip freeze > requirements.txt` (from `backend/`, in a POSIX shell
+7. Create the first login: from `backend/`, `python seed_admin.py
+   you@studio.com` (prompts for a password, ≥ 8 characters), which creates
+   a `developer`-role account. Every account after that is created from
+   the developer app's Users tab — there is no signup page.
+8. To run each frontend app — **repeat for both** `frontend/apps/client`
+   and `frontend/apps/admin`, they are independent installs: `npm install`
+   inside the app directory, then an `.env.local` in that same directory
+   with `BACKEND_API_URL` (`http://localhost:8000`) and `BACKEND_API_KEY`
+   (matching `API_SECRET_KEY` — **not** `NEXT_PUBLIC_`-prefixed, this one
+   is read only by the app's own proxy route, server-side), then `npm run
+   dev` — client serves on `http://localhost:3000`, admin on
+   `http://localhost:3001` (`-p 3001` is baked into `apps/admin/package
+   .json`'s `dev`/`start` scripts). If a dev server or type-checker
+   behaves oddly after a crash/interrupted run, delete that app's own
+   `.next` (pure build cache, safe to delete, regenerates automatically)
+   before investigating further — this is especially worth doing if the
+   project directory is synced by OneDrive/Dropbox/etc., since background
+   syncing can corrupt files that are being actively written mid-build.
+9. Run `pip freeze > requirements.txt` (from `backend/`, in a POSIX shell
    or with explicit UTF-8 output) before deploying to Render — check it
    for Windows-only packages (e.g. `pywin32`) if generated on Windows,
    since Render's Linux build environment cannot install them.

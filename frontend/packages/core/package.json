@@ -1,0 +1,19 @@
+{
+  "name": "studio-core-typecheck-only",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "No build of its own — see README.md. This package.json exists only so `react`/`@types/react` resolve when TypeScript type-checks these files from apps/client or apps/admin, whose tsconfig.json path-maps directly into this folder.",
+  "dependencies": {
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "next": "16.2.12",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

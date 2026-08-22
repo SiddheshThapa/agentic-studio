@@ -1,9 +1,10 @@
-from datetime import datetime
+import re
+from datetime import date, datetime
 import httpx
 from app.core.llm import generate_text
-from app.core.guardrails import check_retrieval_confidence
+from app.core.guardrails import check_retrieval_confidence, retrieval_status
 from app.data.retrieval import hybrid_search
-from app.core.resilience import safe_generate
+from app.core.resilience import safe_generate, logger
 from app.core.config import TMDB_API_KEY, AGENT4_BASE_URL
 from app.ai.evaluator import _parse_json_response
 import json
@@ -46,11 +47,34 @@ For each one, state what guideline topic to check (e.g. "graphic violence rules"
     flagged_topics = safe_generate(generate_text, system_prompt, script_text)
 
     guideline_matches = hybrid_search(flagged_topics, collection="guidelines", top_k=3)
+    status = retrieval_status(guideline_matches)
 
-    if not check_retrieval_confidence(guideline_matches):
-        return "No sufficiently relevant guidelines found for this content. Manual review recommended."
+    if status == "empty":
+        return (
+            "No guideline documents matched this content. If you have not uploaded any "
+            "guidelines yet, do that first — this agent can only cite documents in the "
+            "knowledge base. Manual review recommended."
+        )
+
+    if status == "low_relevance":
+        return (
+            "Guidelines were searched, but none were relevant enough to this content to "
+            "cite responsibly. Manual review recommended."
+        )
 
     context = "\n".join(f"- {m['text']}" for m in guideline_matches)
+
+    # "unscored" means documents were retrieved but the reranker could not rank
+    # them. Reporting them with a caveat beats claiming nothing was found, which
+    # is what the old boolean gate did on every reranker failure.
+    caveat = ""
+    if status == "unscored":
+        logger.warning("Compliance report generated without relevance scoring")
+        caveat = (
+            "\n\nNote: automatic relevance ranking was unavailable for this report, so "
+            "the guidelines quoted above may be less closely matched than usual. "
+            "Verify each citation before acting on it."
+        )
 
     final_prompt = f"""Script content flagged: {flagged_topics}
 
@@ -59,7 +83,7 @@ Relevant guidelines found:
 
 Based on these guidelines, list specific compliance concerns with citations to which guideline applies."""
 
-    return generate_text("You are a compliance report generator.", final_prompt)
+    return generate_text("You are a compliance report generator.", final_prompt) + caveat
 
 
 def analyze_script(script_text: str) -> str:
@@ -72,10 +96,15 @@ def analyze_script(script_text: str) -> str:
     direct_analysis = generate_text("You are a script analyst.", direct_analysis_prompt + "\n\n" + script_text)
 
     comparables = hybrid_search(direct_analysis, collection="past_films", top_k=3)
+    status = retrieval_status(comparables)
 
-    if not check_retrieval_confidence(comparables):
+    if status in ("empty", "low_relevance"):
         comparable_context = "No closely comparable past films found in the database."
     else:
+        # Includes "unscored": unranked comparables are still better grounding
+        # than telling the analyst there are none.
+        if status == "unscored":
+            logger.warning("Comparable films used without relevance scoring")
         comparable_context = "\n".join(f"- {m['text']}" for m in comparables)
 
     final_prompt = f"""Direct analysis:
@@ -128,16 +157,97 @@ def resolve_genre_from_listing(listing_result_id: int) -> str:
     return listing["script_text"].strip()
 
 
+COMPETITION_WINDOW_DAYS = 14
+
+# Matches the lines get_genre_release_listing() writes above, e.g.
+#   "- Evil Dead Burn (2026-07-07)"
+#   "- Untitled Project (date unknown)"
+_LISTING_LINE = re.compile(r"^-\s*(?P<title>.+?)\s*\((?P<date>\d{4}-\d{2}-\d{2}|date unknown)\)\s*$")
+
+
+def parse_listing(listing_text: str) -> tuple[list[tuple[str, date]], list[str]]:
+    """Turn a stored listing back into (title, date) pairs.
+
+    Returns the dated films and, separately, the titles TMDB had no date for —
+    those can't be compared, and silently dropping them would hide them.
+    """
+    dated: list[tuple[str, date]] = []
+    undated: list[str] = []
+
+    for line in listing_text.splitlines():
+        match = _LISTING_LINE.match(line.strip())
+        if not match:
+            continue
+        title, raw = match.group("title"), match.group("date")
+        if raw == "date unknown":
+            undated.append(title)
+        else:
+            dated.append((title, date.fromisoformat(raw)))
+
+    return dated, undated
+
+
+def find_competing_releases(
+    proposed_date: date, listing_text: str, window_days: int = COMPETITION_WINDOW_DAYS
+) -> tuple[list[tuple[str, date, int]], list[str]]:
+    """Films landing within `window_days` either side of the proposed date.
+
+    Each hit is (title, release date, offset in days) where offset is negative for
+    films opening before the proposed date. Sorted by release date.
+    """
+    dated, undated = parse_listing(listing_text)
+
+    competing = [
+        (title, released, (released - proposed_date).days)
+        for title, released in dated
+        if abs((released - proposed_date).days) <= window_days
+    ]
+    competing.sort(key=lambda row: row[1])
+    return competing, undated
+
+
+def _describe_offset(offset: int) -> str:
+    if offset == 0:
+        return "same day"
+    direction = "after" if offset > 0 else "before"
+    magnitude = abs(offset)
+    return f"{magnitude} day{'' if magnitude == 1 else 's'} {direction}"
+
+
 def check_release_conflicts(genre: str, proposed_date: str, listing_text: str) -> str:
-    prompt = f"""Given this list of upcoming {genre} film releases, list every film
-scheduled for release near {proposed_date} (within 2 weeks before or after) that could
-compete with a new {genre} release on that date. For each one, state: movie name, genre,
-studio, and release date. If none are found, say so clearly.
+    """Report which films compete with a release on `proposed_date`.
 
-Release listing:
-{listing_text}"""
+    This used to ask an LLM to read the listing and pick out nearby dates. The
+    listing is generated data with known dates in it, so the comparison is done
+    directly here: exact, instant, free, and it cannot invent a film that was
+    never in the list.
+    """
+    target = date.fromisoformat(proposed_date)
+    competing, undated = find_competing_releases(target, listing_text)
 
-    return generate_text("You are a release scheduling analyst.", prompt)
+    lines: list[str] = []
+    if competing:
+        lines.append(
+            f"{len(competing)} {genre} release{'' if len(competing) == 1 else 's'} "
+            f"within {COMPETITION_WINDOW_DAYS} days of {proposed_date}:"
+        )
+        lines.append("")
+        lines.extend(
+            f"- {title} — {released.isoformat()} ({_describe_offset(offset)})"
+            for title, released, offset in competing
+        )
+    else:
+        lines.append(
+            f"No {genre} releases fall within {COMPETITION_WINDOW_DAYS} days of {proposed_date}."
+        )
+
+    if undated:
+        lines.append("")
+        lines.append(
+            f"Not comparable — no release date announced: {', '.join(sorted(undated))}."
+        )
+
+    return "\n".join(lines)
 
 
 async def check_conflicts_via_a2a(date_str: str) -> dict:

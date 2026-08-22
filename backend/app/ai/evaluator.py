@@ -46,29 +46,3 @@ Respond ONLY with JSON: {{"score": <number>, "reasoning": "<why>"}}"""
         return EvalResult(score=data.get("score"), reasoning=data.get("reasoning", ""))
     except Exception:
         return EvalResult(score=None, reasoning="Could not parse evaluation response.")
-
-
-def score_context_precision(query: str, retrieved_chunks: list[dict]) -> dict:
-    if not retrieved_chunks:
-        return {"score": 0, "reasoning": "No chunks retrieved."}
-
-    chunks_text = "\n".join(f"[{i+1}] {c['text']}" for i, c in enumerate(retrieved_chunks))
-    prompt = f"""Rate 1-10 how relevant these retrieved chunks are to the query overall.
-
-Query: {query}
-
-Retrieved chunks:
-{chunks_text}
-
-Respond ONLY with JSON: {{"score": <number>, "reasoning": "<why>"}}"""
-
-    try:
-        response = generate_text(
-            "You are an evaluation system. Respond only with valid JSON.",
-            prompt,
-            temperature=0.0,
-            response_json=True,
-        )
-        return _parse_json_response(response)
-    except Exception:
-        return {"score": None, "reasoning": "Could not parse evaluation response."}

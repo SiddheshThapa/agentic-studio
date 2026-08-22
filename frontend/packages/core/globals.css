@@ -1,0 +1,412 @@
+@import "tailwindcss";
+
+/* Tailwind v4's automatic class scanner only walks the directory that holds
+   the stylesheet with `@import "tailwindcss"` — this file, so packages/core
+   and below. It never crosses into the sibling apps/client or apps/admin
+   trees, even though each app's own layout.tsx/page.tsx/components import
+   this same file. Left implicit, every class used only inside an app (not
+   re-used from packages/core) is silently missing from the generated CSS —
+   this is what breaks page layout, not just the ink-/iris- tokens below.
+   NOTE: adding any explicit `@source "path"` disables Tailwind's automatic
+   detection of this file's own directory — so packages/core has to be
+   listed explicitly too (as ".") or every class used only there vanishes
+   right along with the gap this was meant to close. */
+@source ".";
+@source "../../apps/client";
+@source "../../apps/admin";
+
+/* Tailwind's content scanner silently drops some ink-/iris- utility candidates
+   from this monorepo's cross-package imports (packages/core scanned from each
+   app's turbopack root) even though they're used as plain static strings —
+   confirmed in both dev and production builds. Safelisting them here forces
+   generation regardless of what the scanner finds. If Tailwind/Turbopack fixes
+   the scan gap, this becomes a no-op — safe to leave in place either way. */
+@source inline("accent-iris-500 bg-ink-400 bg-ink-600 bg-ink-950 bg-ink-950/40 bg-ink-950/55 bg-ink-950/60 bg-iris-400 bg-iris-400/10 bg-iris-400/12 bg-iris-400/70 bg-iris-400/8 bg-iris-500 bg-iris-500/10 bg-iris-500/18 bg-iris-600 border-iris-400/20 border-iris-400/25 border-iris-400/30 border-iris-400/40 border-iris-400/50 border-iris-400/60 border-iris-500/30 focus:bg-ink-950/80 focus:border-iris-400 focus:border-iris-400/60 from-iris-400 hover:bg-iris-400 hover:bg-iris-500 hover:border-iris-400/40 hover:border-iris-400/50 hover:border-iris-400/60 hover:text-ink-100 hover:text-ink-50 hover:text-iris-100 hover:text-iris-300 placeholder:text-ink-500 rounded-[var(--radius-control)] rounded-[var(--radius-surface)] rounded-[var(--radius-panel)] rounded-[var(--radius-hero)] !rounded-[var(--radius-hero)] text-body text-display text-heading text-ink-100 text-ink-200 text-ink-300 text-ink-400 text-ink-50 text-ink-500 text-ink-600 text-ink-800 text-ink-850 text-iris-100 text-iris-200 text-iris-200/90 text-iris-300 text-iris-300/70 text-iris-300/80 to-iris-600 via-iris-400/40");
+
+/* ============================================================================
+   Agentic Studio — design tokens
+   ----------------------------------------------------------------------------
+   Dark, cinematic, extracted-and-adapted from sonypictures.com (design.md):
+   near-black navy ground, one neutral ramp (ink) tinted toward that navy, one
+   accent (iris — kept as the token name, recolored from purple to a cool
+   screening-room teal), three semantic hues that keep their existing meanings:
+   amber = Demo Mode, emerald = healthy, red = broken. Display type is Oswald
+   (condensed, poster-like); body/UI type is Source Sans 3 (Adobe's own
+   open-source relative of the spec'd Acumin Pro). See globals.css history /
+   the design plan for the full rationale — every deliberate deviation from the
+   raw extraction (radius scale, motion durations, spacing) is intentional.
+
+   Tailwind's default palette is still available, because a few panel
+   components have not been restyled yet and still use slate-*. `ink` is tuned
+   to sit next to slate without a visible seam.
+   ========================================================================= */
+
+@theme static {
+  /* -- neutrals: near-black navy → white ----------------------------------- */
+  --color-ink-950: #050811;
+  --color-ink-900: #0a0e18;
+  --color-ink-850: #0e131d;
+  --color-ink-800: #12161f;
+  --color-ink-700: #1c212c;
+  --color-ink-600: #2a2d34;
+  --color-ink-500: #454952;
+  --color-ink-400: #7d7d85;
+  --color-ink-300: #b1b1b1;
+  --color-ink-200: #cbcbd0;
+  --color-ink-100: #e4e4e7;
+  --color-ink-50: #ffffff;
+
+  /* -- accent: cinematic teal, used for one thing at a time, never decoration */
+  --color-iris-600: #1ca394;
+  --color-iris-500: #2fd9c4;
+  --color-iris-400: #45e6d2;
+  --color-iris-300: #7fead9;
+  --color-iris-200: #b3f3e8;
+
+  /* -- type scale: Oswald for display/heading/title, Source Sans below ---- */
+  --text-display: 2.75rem;
+  --text-display--line-height: 1.05;
+  --text-display--letter-spacing: -0.01em;
+  --text-display--font-weight: 600;
+
+  /* Fills the gap between display and title: panel headings, stat figures. */
+  --text-heading: 1.625rem;
+  --text-heading--line-height: 1.15;
+  --text-heading--letter-spacing: -0.005em;
+  --text-heading--font-weight: 500;
+
+  --text-title: 1.125rem;
+  --text-title--line-height: 1.2;
+  --text-title--font-weight: 500;
+
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.6;
+
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.4;
+  --text-label--font-weight: 500;
+
+  --text-micro: 0.6875rem;
+  --text-micro--line-height: 1.3;
+  --text-micro--letter-spacing: 0.12em;
+  --text-micro--font-weight: 600;
+
+  /* -- motion: fast/base for interaction feedback, reveal/hero for the few
+     moments the source's own slow marketing-site timings actually belong --- */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-reveal: ease-in-out;
+  --duration-fast: 150ms;
+  --duration-base: 300ms;
+  --duration-slow: 460ms;
+  --duration-reveal: 800ms;
+  --duration-hero: 1000ms;
+
+  /* -- radii: source's 25px hero number, scaled down for dense UI and kept
+     literal only where a hero moment (login card, hero CTA) wants it -------- */
+  --radius-control: 0.625rem;
+  --radius-surface: 1.125rem;
+  --radius-panel: 1.375rem;
+  --radius-hero: 1.5625rem;
+}
+
+:root {
+  /* Tells the browser to paint native control chrome dark: <select> popups, the
+     date picker and its indicator, autofill, spinners. Without it those are drawn
+     light, which the recessed translucent input styling made unreadable — a dark
+     glyph on a dark field, and near-white option text on the OS's white popup. */
+  color-scheme: dark;
+
+  --background: #050811;
+  --foreground: #ffffff;
+
+  /* Elevation is a pair: a cast shadow plus a top inner hairline. The hairline
+     is what makes a translucent surface read as glass rather than as grey.
+     Tighter and more graphic than a soft glow — closer to a cut card edge. */
+  --hairline: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.5), 0 6px 16px -4px rgb(0 0 0 / 0.6);
+  --shadow-raised: 0 2px 4px rgb(0 0 0 / 0.55), 0 20px 44px -16px rgb(0 0 0 / 0.75);
+  --shadow-accent: 0 8px 24px -8px rgb(47 217 196 / 0.5);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-source-sans);
+  --font-display: var(--font-oswald);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* The custom type-scale sizes carry weight/line-height/tracking via their
+   @theme companions above, but Tailwind has no font-family companion — set it
+   once here rather than on every heading everywhere it's used. */
+.text-display,
+.text-heading,
+.text-title {
+  font-family: var(--font-display), "Helvetica Neue", Arial, sans-serif;
+}
+
+/* A <select>'s dropdown list is painted by the OS, which cannot render the
+   translucent fill the closed control uses — it would composite against white.
+   These are opaque on purpose; do not switch them to an alpha value. */
+option {
+  background-color: var(--color-ink-900);
+  color: var(--color-ink-50);
+}
+
+/* Focus is never removed, only restyled — it is the one ring that has to be
+   visible against every surface in the app. */
+:focus-visible {
+  outline: 2px solid var(--color-iris-400);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+
+* {
+  scrollbar-color: var(--color-ink-700) transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-700);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-600);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  /* -- surfaces ----------------------------------------------------------- */
+
+  /** The base card: translucent, hairlined, sitting over the navy field.
+   *
+   * Deliberately no backdrop-filter. The Database tab can render 200 of these at
+   * once and a blur per card is the kind of thing that turns a scroll janky on a
+   * laptop; at 88% opacity it would barely be visible anyway. Blur is spent on
+   * the few elements that genuinely overlay content — the header and the three
+   * overlays — where there is one of each. */
+  .surface {
+    background: linear-gradient(
+      180deg,
+      rgb(255 255 255 / 0.035) 0%,
+      rgb(255 255 255 / 0.012) 40%,
+      rgb(255 255 255 / 0) 100%
+    ),
+    color-mix(in oklab, var(--color-ink-900) 88%, transparent);
+    border: 1px solid rgb(255 255 255 / 0.08);
+    box-shadow: var(--hairline), var(--shadow-surface);
+  }
+
+  /** Hover affordance for anything clickable that is also a surface. */
+  .surface-interactive {
+    transition: transform var(--duration-base) var(--ease-out-quint),
+      border-color var(--duration-base) var(--ease-out-quint),
+      box-shadow var(--duration-base) var(--ease-out-quint),
+      background-color var(--duration-base) var(--ease-out-quint);
+  }
+  .surface-interactive:hover {
+    transform: translateY(-1px);
+    border-color: rgb(255 255 255 / 0.14);
+    box-shadow: var(--hairline), var(--shadow-raised);
+  }
+  .surface-interactive:active {
+    transform: translateY(0) scale(0.995);
+    transition-duration: var(--duration-fast);
+  }
+
+  /* -- controls ----------------------------------------------------------- */
+
+  /** Press feedback shared by every button in the app. */
+  .press {
+    transition: transform var(--duration-fast) var(--ease-out-quint),
+      background-color var(--duration-base) var(--ease-out-quint),
+      border-color var(--duration-base) var(--ease-out-quint),
+      color var(--duration-base) var(--ease-out-quint),
+      box-shadow var(--duration-base) var(--ease-out-quint), opacity var(--duration-base) linear;
+  }
+  .press:active:not(:disabled) {
+    transform: scale(0.975);
+  }
+
+  /** A single sheen sweep across a primary button on hover. Decorative, but it
+      only ever fires on deliberate pointer intent, so it never competes with
+      state-carrying motion elsewhere. */
+  .sheen {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .sheen::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(
+      100deg,
+      transparent 20%,
+      rgb(255 255 255 / 0.16) 45%,
+      transparent 70%
+    );
+    transform: translateX(-120%);
+    transition: transform var(--duration-slow) var(--ease-out-quint);
+  }
+  .sheen:hover::after {
+    transform: translateX(120%);
+  }
+
+  /** Loading placeholder. A shape where content will be, not a spinner in a void:
+      the layout does not jump when the real thing arrives. */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      rgb(255 255 255 / 0.04) 25%,
+      rgb(255 255 255 / 0.08) 37%,
+      rgb(255 255 255 / 0.04) 63%
+    );
+    background-size: 400% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+
+  /* -- navigation --------------------------------------------------------- */
+
+  /** Tab underline that wipes in from the left rather than appearing. The width
+      is the element's own, so nothing has to be measured in JavaScript. */
+  .tab-underline {
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform var(--duration-base) var(--ease-out-quint),
+      opacity var(--duration-base) var(--ease-out-quint);
+    opacity: 0;
+  }
+  [data-active="true"] .tab-underline {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  [data-active="false"]:hover .tab-underline {
+    transform: scaleX(1);
+    opacity: 0.28;
+  }
+}
+
+@layer utilities {
+  /** Sequenced entrance for a tab's worth of content — a "reveal" moment, so it
+      runs at the source's own slower marketing-site timing (800ms, ease-in-out)
+      rather than the fast/base tier used for hover and press feedback. The index
+      comes in as --i from the map that renders the list, so the stagger costs
+      no state and no timers. */
+  .stagger {
+    animation: fade-in-up var(--duration-reveal) var(--ease-reveal) backwards;
+    animation-delay: calc(var(--i, 0) * 45ms);
+  }
+
+  .text-gradient {
+    background: linear-gradient(180deg, var(--color-ink-50) 30%, var(--color-ink-300) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/** A single item's own entrance (error/success banners, confirm panels, a
+    freshly-arrived result) — frequent and small, so it stays on the fast/base
+    feel rather than the "reveal" tier's 800ms. */
+.animate-fade-in-up {
+  animation: fade-in-up var(--duration-slow) var(--ease-out-quint);
+}
+
+/* The health dot's "still checking" pulse — slower and shallower than Tailwind's
+   animate-pulse, which reads as an alarm at this size. */
+@keyframes shimmer {
+  from {
+    background-position: 100% 50%;
+  }
+  to {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.88);
+  }
+}
+
+.animate-breathe {
+  animation: breathe 2.6s var(--ease-out-quint) infinite;
+}
+
+/* Header condensing on scroll, done by the compositor rather than by a scroll
+   listener and a state update. Progressive enhancement: where the timeline is
+   unsupported the header simply stays in its resting state. */
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .header-condense {
+      animation: header-condense linear both;
+      animation-timeline: scroll();
+      animation-range: 0 120px;
+    }
+  }
+}
+
+@keyframes header-condense {
+  from {
+    background-color: rgb(5 8 17 / 0.55);
+    border-bottom-color: rgb(255 255 255 / 0.05);
+    box-shadow: 0 0 0 0 rgb(0 0 0 / 0);
+  }
+  to {
+    background-color: rgb(5 8 17 / 0.88);
+    border-bottom-color: rgb(255 255 255 / 0.1);
+    box-shadow: 0 16px 40px -24px rgb(0 0 0 / 0.9);
+  }
+}
+
+/* One switch for everything above. Motion here is meant to explain state, and
+   state is still legible without it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .surface-interactive:hover,
+  .press:active:not(:disabled) {
+    transform: none;
+  }
+}
