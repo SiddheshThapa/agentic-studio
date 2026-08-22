@@ -21,6 +21,8 @@ A multi-agent AI platform for film & TV script evaluation, built with **FastAPI*
 
 ## 🏗️ Project Structure
 
+Two frontends now — a client app and a developer app — sharing one component/lib package, sitting in front of the same two backend services:
+
 ```
 agentic-studio/
 ├── backend/
@@ -35,26 +37,34 @@ agentic-studio/
 │   │   │   ├── config.py                    # Environment variables & constants
 │   │   │   ├── llm.py                       # Google GenAI SDK wrapper (generate_text, embed_text)
 │   │   │   ├── guardrails.py                # Toxicity filter, prompt injection detection
-│   │   │   └── resilience.py                # Retry decorator, rate limiter, structured logger
+│   │   │   ├── resilience.py                # Retry decorator, rate limiter, structured logger
+│   │   │   └── auth.py                      # Password hashing, session JWT, require_role() — login system
 │   │   ├── data/
-│   │   │   ├── database.py                  # Postgres CRUD (pgvector, cache, memory, results, eval)
+│   │   │   ├── database.py                  # Postgres CRUD (pgvector, cache, memory, results, eval, users)
 │   │   │   ├── ingest.py                    # PDF chunking + embedding storage
 │   │   │   └── retrieval.py                 # Hybrid search (pgvector cosine + BM25 rerank)
 │   │   └── integrations/
 │   │       ├── calendar_mcp.py              # Google Calendar via Model Context Protocol
 │   │       ├── calendar_service_account.py  # Google Calendar via Service Account
 │   │       └── web_fetch.py                 # BeautifulSoup web scraping utility
+│   ├── seed_admin.py                        # One-time CLI: create the first developer account
 │   └── microservices/
 │       └── agent4_service.py                # Standalone A2A server (port 8001) — holiday & event conflict checker
 │
 └── frontend/
-    ├── app/
-    │   ├── layout.tsx                       # Root layout with font and metadata
-    │   ├── page.tsx                         # Single-page app — all panels, state, and UI components
-    │   └── globals.css                      # Global CSS and custom animations
-    └── lib/
-        └── api.ts                           # All typed API calls to the backend (fetch wrappers, TypeScript interfaces)
+    ├── packages/core/                       # Shared code — not an npm package, see its own README
+    │   ├── lib/api.ts                       # Every typed backend call (fetch wrappers, TypeScript interfaces)
+    │   ├── lib/session.ts                   # useSession() — login/role gate hook
+    │   ├── lib/proxy.ts                     # Same-origin backend proxy both apps re-export
+    │   └── components/                      # Every panel that isn't developer-only, + LoginForm, + ui.tsx
+    ├── apps/client/                         # Start here · Documents · Agents · Release Planner · History · Insights
+    │   └── app/page.tsx                     # Shell: header, mode toggle, health poll, login gate, tabs
+    └── apps/admin/                          # Everything client has, + Database, API Log, Users
+        ├── app/page.tsx                     # Same shell + the 3 admin-only tabs + developer-role check
+        └── components/                      # Admin-only: DatabasePanel, DatabaseEditor, ApiLogPanel, UsersPanel
 ```
+
+Neither frontend calls the backend directly from the browser — each proxies through its own Next.js server route (`app/api/proxy/[...path]/route.ts`), which is also where the shared API key gets attached, server-side, so it never reaches client JS.
 
 ---
 
@@ -269,23 +279,39 @@ uvicorn app.main:app --port 8000
 # Starts on http://localhost:8000
 ```
 
-### 3. Frontend Setup
+### 3. Create the first login
+
+No signup page — the first account is created directly against the database:
 
 ```bash
-cd frontend
-npm install
+cd backend
+python seed_admin.py you@studio.com
+# prompts for a password, creates a developer-role account
 ```
+
+Every account after that is created from the developer app's Users tab.
+
+### 4. Frontend Setup — two apps, each its own install
+
+```bash
+cd frontend/apps/client && npm install
+cd frontend/apps/admin && npm install
+```
+
+Each app gets its own `.env.local` (**not** `frontend/.env` — and not `NEXT_PUBLIC_`-prefixed, since these are read server-side only, by the app's own proxy route):
 
 ```env
-# frontend/.env
-NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_API_KEY=your_secret_key
+# frontend/apps/client/.env.local  (and the same in apps/admin/.env.local)
+BACKEND_API_URL=http://localhost:8000
+BACKEND_API_KEY=your_secret_key
 ```
 
 ```bash
-npm run dev
-# Opens at http://localhost:3000
+cd frontend/apps/client && npm run dev   # http://localhost:3000
+cd frontend/apps/admin  && npm run dev   # http://localhost:3001
 ```
+
+Log in with the account from step 3. The client app gets the working pipelines; the developer app gets those plus the database browser, API log, and user management — enforced both by the UI (which app you're in) and by the backend (`require_role("developer")` on the admin-only routes, so a client-role session can't reach them even by calling the API directly).
 
 ---
 
@@ -306,8 +332,14 @@ npm run dev
 | `POST` | `/finalize-calendar/{id}` | ✅ | Finalize with per-country date overrides |
 | `GET` | `/eval/summary` | ❌ | Evaluation score summary |
 | `GET` | `/eval/chart` | ❌ | Evaluation trend chart (base64 PNG) |
+| `POST` | `/auth/login` | ❌ | Sign in, sets the session cookie |
+| `POST` | `/auth/logout` | ❌ | Clear the session cookie |
+| `GET` | `/auth/me` | ❌\* | Who's currently logged in — \*needs a valid session cookie, just no `X-API-Key` |
+| `GET`/`POST` | `/auth/users` | 🧑‍💻 | List / create accounts |
+| `PATCH`/`DELETE` | `/auth/users/{id}` | 🧑‍💻 | Change role / remove an account |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/admin/tables/*` | ✅ 🧑‍💻 | Generic browser over the 5 non-`users` tables |
 
-**Authentication:** Pass `X-API-Key: <your_key>` header for protected routes.
+**Authentication:** Pass `X-API-Key: <your_key>` header for ✅ routes. 🧑‍💻 routes additionally need a logged-in session cookie with `role = "developer"` — get one via `/auth/login`. The two frontend apps never send `X-API-Key` from the browser at all; their own server-side proxy route does that for them (see Project Structure above).
 
 **Task types** (pass as `task` form field to `/run-agent`):
 
@@ -323,21 +355,36 @@ npm run dev
 
 ## 🖥️ Frontend Panels
 
+**Client app** (`apps/client`, port 3000) — the working pipelines:
+
 | Panel | Description |
 |---|---|
 | **Agents** | Select a task, paste script text, run an agent, view results with optional faithfulness evaluation. Greenlight results render as a full "Boardroom Chat" UI with Digest, Producer Pitch, Executive Memo, and Studio Stamp. |
 | **Documents** | Upload PDFs to populate the RAG store or delete existing documents by filename |
 | **History** | Browse per-session conversation turns stored in Postgres |
 | **Insights** | View average faithfulness scores and the evaluation score trend chart over time |
+| **Release Planner** | The four-step release-date flow: propose a date, review conflicts, edit per-country dates, create calendar events |
+| **Start here** | What the tool does, plus four guided walkthroughs (one per pipeline) |
+
+**Developer app** (`apps/admin`, port 3001) — everything above, plus:
+
+| Panel | Description |
+|---|---|
+| **Database** | Visual browser/editor over the five non-`users` tables, with structural-field warnings |
+| *(API Log)* | Not a tab — a toggle in the header. Technical request/response drawer, method/path/status/payload per call |
+| **Users** | Create accounts, change role (`developer`/`client`), remove access |
+
+Both apps sit behind a login screen; the developer app additionally refuses (with a plain explanation, not a raw error) any account that isn't `role = "developer"`.
 
 ---
 
 ## 🔒 Security Notes
 
-- **API Key:** All write operations require the `X-API-Key` header matching `API_SECRET_KEY` in `.env`.
+- **API Key:** All write operations require the `X-API-Key` header matching `API_SECRET_KEY` in `.env`. Neither frontend app sends this from the browser — their own server-side proxy route attaches it from a `BACKEND_API_KEY` env var that's never shipped to client JS.
+- **Login sessions:** A `users` table (PBKDF2 password hashing) plus a signed JWT session cookie (`app/core/auth.py`). `require_role("developer")` gates `/admin/tables/*` and `/auth/users*` on top of the API key, not instead of it, and re-checks the user's role against the database on every call rather than trusting the JWT alone — so a demotion or account deletion takes effect immediately on those routes instead of waiting out the 12-hour session. No signup page — the first account is created by `backend/seed_admin.py`, every account after that from the developer app's Users tab; the last remaining `developer` account can't be demoted or deleted. `/auth/login` is rate-limited (20 attempts/60s per IP, 5/60s per email), in-memory like the app's other rate limiting below.
 - **Guardrails:** All inputs pass through a toxicity filter and prompt-injection detector (`app/core/guardrails.py`). Script-mode tasks (`greenlight`, `analyze`) intentionally bypass the toxicity check since R-rated content is expected.
-- **Rate Limiting:** 10 requests per 60-second window per session ID, enforced in-memory.
-- **Row-Level Security:** All Postgres tables have RLS enabled.
+- **Rate Limiting:** 10 requests per 60-second window per session ID on `/run-agent`/`/check-conflicts`/`/finalize-calendar`, enforced in-memory; `/auth/login` uses its own tighter, separately-keyed limits (above).
+- **Row-Level Security:** All six Postgres tables (including `users`) have RLS enabled.
 
 ---
 

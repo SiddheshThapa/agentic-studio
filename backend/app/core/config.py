@@ -21,3 +21,8 @@ SUPPORTED_COUNTRIES = [
 CALENDAR_MODE = os.getenv("CALENDAR_MODE", "service_account")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")
+
+# Signs the login session cookie (see app/core/auth.py). Falls back to
+# API_SECRET_KEY so there isn't a second required secret to provision --
+# set JWT_SECRET_KEY explicitly if the two should ever rotate independently.
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or API_SECRET_KEY

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Header, Depends, HTTPException, Body
+from fastapi import FastAPI, UploadFile, File, Form, Header, Depends, HTTPException, Body, Request
 from pypdf import PdfReader
 import io
 import json
@@ -15,6 +15,12 @@ from app.data.database import (
     admin_columns, admin_delete_row, admin_get_row, admin_insert_row,
     admin_list_rows, admin_structural_warnings, admin_table_summary,
     admin_update_row,
+    create_user, get_user_by_email, get_user_by_id, list_users,
+    update_user_role, delete_user, count_developers,
+)
+from app.core.auth import (
+    COOKIE_NAME, SESSION_HOURS, create_session_token, get_current_user,
+    hash_password, require_role, verify_password,
 )
 from app.data.ingest import ingest_document
 from app.ai.supervisor import run_supervisor
@@ -360,6 +366,130 @@ async def download_result_endpoint(result_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Login sessions
+#
+# Splits the app into a client build and a developer build sharing this one
+# backend: role lives in the session cookie's JWT (app/core/auth.py), checked
+# by require_role() below. Cookie, not a token the frontend stores itself, so
+# a same-origin Next.js proxy route can hold the real X-API-Key server-side
+# and forward it on the strength of this cookie alone.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/auth/login")
+async def login_endpoint(request: Request, response: Response, credentials: dict = Body(...)):
+    email = (credentials.get("email") or "").strip()
+    password = credentials.get("password") or ""
+
+    # Rate-limited per source IP (catches credential stuffing across many
+    # emails) and per email (catches brute-forcing one account from many
+    # IPs) — reuses the same in-process tracker /run-agent uses, so like
+    # that one it resets on restart and isn't shared across workers.
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(f"login_ip:{client_ip}", max_requests=20, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again shortly.")
+    if email and not check_rate_limit(f"login_email:{email.lower()}", max_requests=5, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again shortly.")
+
+    row = get_user_by_email(email) if email else None
+    if row is None:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    user_id, user_email, password_hash, salt, role = row
+    if not verify_password(password, password_hash, salt):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    token = create_session_token(user_id, user_email, role)
+    response.set_cookie(
+        COOKIE_NAME, token,
+        httponly=True, samesite="lax", max_age=SESSION_HOURS * 3600,
+    )
+    return {"email": user_email, "role": role}
+
+
+@app.post("/auth/logout")
+async def logout_endpoint(response: Response):
+    response.delete_cookie(COOKIE_NAME)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+async def me_endpoint(user: dict | None = Depends(get_current_user)):
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not logged in.")
+    return {"email": user["email"], "role": user["role"]}
+
+
+# ---------------------------------------------------------------------------
+# User accounts — developer-only. No signup: accounts are created here by an
+# existing developer (or the seed_admin.py script, for the very first one).
+# ---------------------------------------------------------------------------
+
+
+@app.get("/auth/users", dependencies=[Depends(require_role("developer"))])
+async def list_users_endpoint():
+    return {
+        "users": [
+            {"id": r[0], "email": r[1], "role": r[2], "created_at": r[3].isoformat()}
+            for r in list_users()
+        ]
+    }
+
+
+@app.post("/auth/users", dependencies=[Depends(require_role("developer"))])
+async def create_user_endpoint(body: dict = Body(...)):
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    role = body.get("role")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="email and password are required.")
+    if role not in ("developer", "client"):
+        raise HTTPException(status_code=400, detail="role must be 'developer' or 'client'.")
+
+    password_hash, salt = hash_password(password)
+    try:
+        user_id = create_user(email, password_hash, salt, role)
+    except Exception:
+        # Don't echo the raw DB error back to the client (e.g. constraint
+        # text) — the near-certain cause is the UNIQUE(email) constraint.
+        logger.warning("create_user failed for %s", email, exc_info=True)
+        raise HTTPException(status_code=400, detail="Could not create user (duplicate email?).")
+    return {"id": user_id, "email": email.lower(), "role": role}
+
+
+def _refuse_if_last_developer(user_id: int, action: str) -> None:
+    """Guards demote/delete: without this, removing the last developer
+    account locks every /admin/* and /auth/users route with no way back in
+    short of DB access and re-running seed_admin.py."""
+    target = get_user_by_id(user_id)
+    if target is not None and target[2] == "developer" and count_developers() <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can't {action} the only developer account — create another developer first.",
+        )
+
+
+@app.patch("/auth/users/{user_id}", dependencies=[Depends(require_role("developer"))])
+async def update_user_role_endpoint(user_id: int, body: dict = Body(...)):
+    role = body.get("role")
+    if role not in ("developer", "client"):
+        raise HTTPException(status_code=400, detail="role must be 'developer' or 'client'.")
+    if role != "developer":
+        _refuse_if_last_developer(user_id, "demote")
+    if not update_user_role(user_id, role):
+        raise HTTPException(status_code=404, detail=f"No user {user_id}.")
+    return {"id": user_id, "role": role}
+
+
+@app.delete("/auth/users/{user_id}", dependencies=[Depends(require_role("developer"))])
+async def delete_user_endpoint(user_id: int):
+    _refuse_if_last_developer(user_id, "delete")
+    if not delete_user(user_id):
+        raise HTTPException(status_code=404, detail=f"No user {user_id}.")
+    return {"deleted": user_id}
+
+
+# ---------------------------------------------------------------------------
 # Admin table browser
 #
 # Generic list/read/create/update/delete over the five tables. The SQL lives in
@@ -370,6 +500,8 @@ async def download_result_endpoint(result_id: int):
 # other open reads return one known row (/result/{id}) or one named session
 # (/history/{id}); GET /admin/tables/memory returns every session anyone has
 # ever run, which is a different exposure and gets the same gate as the writes.
+# require_role("developer") is layered on top of the API key, not instead of
+# it: this is the boundary the client/developer app split actually depends on.
 # ---------------------------------------------------------------------------
 
 
@@ -380,7 +512,7 @@ def _admin_or_400(fn, *args, **kwargs):
         raise HTTPException(status_code=400, detail=str(err))
 
 
-@app.get("/admin/tables", dependencies=[Depends(require_api_key)])
+@app.get("/admin/tables", dependencies=[Depends(require_api_key), Depends(require_role("developer"))])
 async def admin_tables_endpoint():
     return {
         "tables": admin_table_summary(),
@@ -393,7 +525,7 @@ async def admin_tables_endpoint():
     }
 
 
-@app.get("/admin/tables/{table}", dependencies=[Depends(require_api_key)])
+@app.get("/admin/tables/{table}", dependencies=[Depends(require_api_key), Depends(require_role("developer"))])
 async def admin_list_endpoint(
     table: str,
     limit: int = ADMIN_LIST_DEFAULT_LIMIT,
@@ -403,7 +535,7 @@ async def admin_list_endpoint(
     return _admin_or_400(admin_list_rows, table, limit=limit, offset=offset, query=q)
 
 
-@app.get("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key)])
+@app.get("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key), Depends(require_role("developer"))])
 async def admin_get_row_endpoint(table: str, row_id: str):
     row = _admin_or_400(admin_get_row, table, row_id)
     if row is None:
@@ -417,7 +549,7 @@ async def admin_get_row_endpoint(table: str, row_id: str):
     }
 
 
-@app.post("/admin/tables/{table}", dependencies=[Depends(require_api_key)])
+@app.post("/admin/tables/{table}", dependencies=[Depends(require_api_key), Depends(require_role("developer"))])
 async def admin_create_row_endpoint(table: str, values: dict = Body(...)):
     warnings = _admin_or_400(admin_structural_warnings, table, list(values))
     try:
@@ -433,7 +565,7 @@ async def admin_create_row_endpoint(table: str, values: dict = Body(...)):
     return {"table": table, **created, "structural_warnings": warnings}
 
 
-@app.patch("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key)])
+@app.patch("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key), Depends(require_role("developer"))])
 async def admin_update_row_endpoint(table: str, row_id: str, values: dict = Body(...)):
     warnings = _admin_or_400(admin_structural_warnings, table, list(values))
     try:
@@ -450,7 +582,7 @@ async def admin_update_row_endpoint(table: str, row_id: str, values: dict = Body
     return {"table": table, "row_id": row_id, **updated, "structural_warnings": warnings}
 
 
-@app.delete("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key)])
+@app.delete("/admin/tables/{table}/{row_id}", dependencies=[Depends(require_api_key), Depends(require_role("developer"))])
 async def admin_delete_row_endpoint(table: str, row_id: str):
     deleted = _admin_or_400(admin_delete_row, table, row_id)
     if deleted["deleted_rows"] == 0:

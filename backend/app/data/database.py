@@ -172,11 +172,67 @@ def _create_schema(cur):
         );
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('developer', 'client')),
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+
     cur.execute("ALTER TABLE documents ENABLE ROW LEVEL SECURITY;")
     cur.execute("ALTER TABLE cache ENABLE ROW LEVEL SECURITY;")
     cur.execute("ALTER TABLE memory ENABLE ROW LEVEL SECURITY;")
     cur.execute("ALTER TABLE results ENABLE ROW LEVEL SECURITY;")
     cur.execute("ALTER TABLE eval_history ENABLE ROW LEVEL SECURITY;")
+    cur.execute("ALTER TABLE users ENABLE ROW LEVEL SECURITY;")
+
+
+# ---- user accounts ---------------------------------------------------------
+# Deliberately not in ADMIN_TABLES: that browser casts every column to text for
+# `?q=` search and returns whole rows, which is fine for cache/results but wrong
+# for a table holding password_hash/salt. These five functions are the only way
+# to touch `users`, and app/core/auth.py is the only caller.
+
+
+def create_user(email: str, password_hash: str, salt: str, role: str) -> int:
+    return _execute_returning(
+        "INSERT INTO users (email, password_hash, salt, role) VALUES (%s, %s, %s, %s) RETURNING id;",
+        (email.lower(), password_hash, salt, role),
+    )
+
+
+def get_user_by_email(email: str) -> tuple | None:
+    return _fetch_one(
+        "SELECT id, email, password_hash, salt, role FROM users WHERE email = %s;",
+        (email.lower(),),
+    )
+
+
+def list_users() -> list[tuple]:
+    return _fetch_all("SELECT id, email, role, created_at FROM users ORDER BY id;")
+
+
+def get_user_by_id(user_id: int) -> tuple | None:
+    """(id, email, role) — used to re-check a session's role against the DB on
+    every role-gated request, since the JWT's own `role` claim is a snapshot
+    from login time and doesn't see a role change or deletion until it expires."""
+    return _fetch_one("SELECT id, email, role FROM users WHERE id = %s;", (user_id,))
+
+
+def count_developers() -> int:
+    return _fetch_one("SELECT COUNT(*) FROM users WHERE role = 'developer';")[0]
+
+
+def update_user_role(user_id: int, role: str) -> bool:
+    return _execute("UPDATE users SET role = %s WHERE id = %s;", (role, user_id)) > 0
+
+
+def delete_user(user_id: int) -> bool:
+    return _execute("DELETE FROM users WHERE id = %s;", (user_id,)) > 0
 
 
 def insert_document(collection: str, text: str, metadata: dict, embedding: list[float]) -> int:
