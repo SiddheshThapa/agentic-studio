@@ -264,19 +264,6 @@ export function runAgent(scriptText: string, task: TaskType, sessionId: string, 
   );
 }
 
-export function confirmDate(resultId: number) {
-  return request<DateConfirmationResponse>(`/confirm-date/${resultId}`, { method: "POST" }, true);
-}
-
-export function overrideDate(resultId: number, newDate: string) {
-  const form = new URLSearchParams({ new_date: newDate });
-  return request<DateConfirmationResponse>(
-    `/override-date/${resultId}`,
-    { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form },
-    true
-  );
-}
-
 export function checkConflicts(resultId: number, sessionId: string = "default") {
   return request<ConflictCheckResponse>(
     `/check-conflicts/${resultId}?session_id=${encodeURIComponent(sessionId)}`,
